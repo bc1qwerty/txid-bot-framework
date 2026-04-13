@@ -20,6 +20,15 @@ type CommandHandler func(ctx context.Context, chatID int64, args string) string
 // Return "" to leave the message as is; handler is responsible for any UI updates.
 type CallbackHandler func(ctx context.Context, query *tgbotapi.CallbackQuery) string
 
+// TextHandler handles a free-text (non-command) message. Useful for bots
+// that maintain conversation state and need user input mid-flow
+// (bangool's /add walks the user through area/price/apt_name prompts).
+//
+// Return a non-empty string to send a text reply. Return "" if the
+// handler has already replied (e.g., via the underlying tgbotapi
+// directly to attach inline keyboards).
+type TextHandler func(ctx context.Context, msg *tgbotapi.Message) string
+
 // SubscribeHook is called asynchronously after a successful /subscribe.
 // Useful for backlog delivery to new subscribers.
 type SubscribeHook func(ctx context.Context, chatID int64)
@@ -31,6 +40,7 @@ type TelegramDispatcher struct {
 	store        *store.Store
 	handlers     map[string]CommandHandler
 	callbacks    map[string]CallbackHandler
+	textHandler  TextHandler
 	messages     DispatcherMessages
 	onSubscribe  SubscribeHook
 }
@@ -73,6 +83,14 @@ func (d *TelegramDispatcher) HandleCallback(prefix string, h CallbackHandler) {
 	d.callbacks[prefix] = h
 }
 
+// HandleText registers a single handler for free-text (non-command)
+// messages. Only one TextHandler can be registered per dispatcher;
+// the bot is expected to multiplex internally based on per-chat state.
+// A nil handler clears any previous registration.
+func (d *TelegramDispatcher) HandleText(h TextHandler) {
+	d.textHandler = h
+}
+
 // OnSubscribe registers a hook invoked after a /subscribe succeeds.
 // The hook runs in a goroutine so it does not block the dispatcher.
 func (d *TelegramDispatcher) OnSubscribe(hook SubscribeHook) {
@@ -107,9 +125,23 @@ func (d *TelegramDispatcher) Start(ctx context.Context) error {
 		}
 		if update.Message.IsCommand() {
 			d.handleCommand(ctx, update.Message)
+			continue
+		}
+		if d.textHandler != nil && update.Message.Text != "" {
+			d.handleText(ctx, update.Message)
 		}
 	}
 	return nil
+}
+
+// handleText invokes the registered TextHandler and sends any reply.
+func (d *TelegramDispatcher) handleText(ctx context.Context, msg *tgbotapi.Message) {
+	reply := d.textHandler(ctx, msg)
+	if reply == "" {
+		return
+	}
+	out := tgbotapi.NewMessage(msg.Chat.ID, reply)
+	_, _ = d.tg.API().Send(out)
 }
 
 // handleCallback routes a callback query to a registered prefix handler.

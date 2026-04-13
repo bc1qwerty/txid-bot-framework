@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
 	"github.com/bc1qwerty/txid-bot-framework/pkg/core"
 	"github.com/bc1qwerty/txid-bot-framework/pkg/store"
 )
@@ -395,4 +397,36 @@ func TestItemFilterWithSubscriptionMeta(t *testing.T) {
 	if notifier.sent[0][:5] != "chat1" {
 		t.Errorf("expected chat1 recipient, got %q", notifier.sent[0])
 	}
+}
+
+// TestHandleTextRegistration verifies the TextHandler hook plumbing.
+// We can't easily fake tgbotapi's update channel, so this test only
+// pins the surface API: the handler can be registered, replaced with
+// nil, and re-registered without panicking. End-to-end dispatch is
+// exercised via integration runs (food-recall + bangool).
+func TestHandleTextRegistration(t *testing.T) {
+	st := newTestStore(t)
+	// notify.NewTelegram needs a real token; we cannot construct a
+	// dispatcher without one in unit tests. Build the struct directly
+	// to verify the API shape.
+	d := &TelegramDispatcher{
+		store:     st,
+		handlers:  make(map[string]CommandHandler),
+		callbacks: make(map[string]CallbackHandler),
+	}
+
+	called := false
+	d.HandleText(func(ctx context.Context, msg *tgbotapi.Message) string {
+		called = true
+		return "ok"
+	})
+	if d.textHandler == nil {
+		t.Errorf("HandleText did not register")
+	}
+	// Replacing with nil should clear.
+	d.HandleText(nil)
+	if d.textHandler != nil {
+		t.Errorf("nil HandleText should clear")
+	}
+	_ = called
 }
