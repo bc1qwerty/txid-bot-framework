@@ -48,22 +48,31 @@ type Config struct {
 	// A non-nil return is logged, not fatal - dispatch still proceeds.
 	OnNewItem func(ctx context.Context, item core.Item) error
 
-	// ItemFilter decides whether a given subscriber should receive a given
-	// item. Return true to deliver, false to skip.
+	// ItemFilter decides whether a given Subscription should receive a
+	// given item. Return true to deliver, false to skip.
 	//
-	// When nil, all items are delivered to all active subscribers (default
-	// broadcast behavior). When non-nil, filtered-out (item, chatID) pairs
-	// are NOT marked as sent, so a later filter change can deliver them.
+	// When nil, all items are delivered to all active Subscriptions
+	// (default broadcast behavior). When non-nil, filtered-out
+	// (item, sub) pairs are NOT marked as sent, so a later filter change
+	// can deliver them within the same bot_seen lifetime.
 	//
-	// Performance note: this runs O(items × subscribers) per poll. Load any
-	// per-subscriber filter state into a closure at poll start rather than
-	// querying inside the filter body. Example:
+	// The Subscription.ID is what MarkSent uses, and Subscription.Meta
+	// carries whatever per-sub state the bot stored via SubscribeRich.
 	//
-	//	Config{ ItemFilter: func(ctx context.Context, chatID string, it core.Item) bool {
-	//		// closure over pre-loaded map[chatID]filterCond
-	//		return matches(conds[chatID], it)
-	//	}}
-	ItemFilter func(ctx context.Context, chatID string, item core.Item) bool
+	// Performance note: this runs O(items × subscriptions) per poll. For
+	// bots with heavy per-sub filter logic, load everything into a
+	// closure at poll start rather than querying inside the filter body.
+	ItemFilter func(ctx context.Context, sub store.Subscription, item core.Item) bool
+}
+
+// SubscriberFormatter is an optional interface a core.Formatter can
+// implement to customize the rendered Message per Subscription. When
+// the Runner detects this interface, it calls FormatFor instead of the
+// basic Format(item). This is how condition-based bots (bangool,
+// bid-alert) can include "which condition triggered" context in the
+// alert text.
+type SubscriberFormatter interface {
+	FormatFor(sub store.Subscription, item core.Item) core.Message
 }
 
 // Runner executes the poll loop.
@@ -149,14 +158,18 @@ func (r *Runner) pollOnce(ctx context.Context) {
 		return
 	}
 
-	// Get subscribers
-	subs, err := r.cfg.Store.ActiveSubscribers()
+	// Get subscriptions (the framework iterates these, not raw chat_ids,
+	// so bots with per-user filter conditions can register one
+	// Subscription per condition and keep dedup independent per slot).
+	subs, err := r.cfg.Store.ActiveSubscriptions()
 	if err != nil {
-		r.log.Printf("subscribers error: %v", err)
+		r.log.Printf("subscriptions error: %v", err)
 		return
 	}
 
-	r.log.Printf("dispatching %d new items to %d subscribers", len(newItems), len(subs))
+	subFormatter, _ := r.cfg.Formatter.(SubscriberFormatter)
+
+	r.log.Printf("dispatching %d new items to %d subscriptions", len(newItems), len(subs))
 
 	// Notify
 	for _, item := range newItems {
@@ -165,24 +178,33 @@ func (r *Runner) pollOnce(ctx context.Context) {
 				r.log.Printf("OnNewItem hook error (item=%s): %v", item.ID, err)
 			}
 		}
-		msg := r.cfg.Formatter.Format(item)
 
-		for _, chatID := range subs {
-			sent, err := r.cfg.Store.IsSent(chatID, item.ID)
+		// Base message is computed once when there is no sub-aware formatter.
+		var baseMsg core.Message
+		if subFormatter == nil {
+			baseMsg = r.cfg.Formatter.Format(item)
+		}
+
+		for _, sub := range subs {
+			sent, err := r.cfg.Store.IsSent(sub.ID, item.ID)
 			if err != nil || sent {
 				continue
 			}
-			if r.cfg.ItemFilter != nil && !r.cfg.ItemFilter(ctx, chatID, item) {
-				// Intentionally NOT marking sent: if the filter condition
-				// changes before the item ages out of bot_seen, we want the
-				// next poll to re-evaluate and potentially deliver it.
+			if r.cfg.ItemFilter != nil && !r.cfg.ItemFilter(ctx, sub, item) {
+				// Intentionally NOT marking sent: if the filter state
+				// changes before the item ages out of bot_seen, the next
+				// poll can re-evaluate and potentially deliver it.
 				continue
 			}
-			if err := r.cfg.Notifier.Send(ctx, chatID, msg); err != nil {
-				r.log.Printf("send error chat=%s: %v", chatID, err)
+			msg := baseMsg
+			if subFormatter != nil {
+				msg = subFormatter.FormatFor(sub, item)
+			}
+			if err := r.cfg.Notifier.Send(ctx, sub.Recipient, msg); err != nil {
+				r.log.Printf("send error sub=%s recipient=%s: %v", sub.ID, sub.Recipient, err)
 				continue
 			}
-			if err := r.cfg.Store.MarkSent(chatID, item.ID); err != nil {
+			if err := r.cfg.Store.MarkSent(sub.ID, item.ID); err != nil {
 				r.log.Printf("mark sent error: %v", err)
 			}
 		}

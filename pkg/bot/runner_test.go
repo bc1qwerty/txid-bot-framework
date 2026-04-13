@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -103,7 +104,7 @@ func TestItemFilterRejectAll(t *testing.T) {
 	r := New(Config{
 		Name: "test", Source: src, Formatter: fakeFormatter{},
 		Notifier: notifier, Store: st, PollInterval: time.Hour,
-		ItemFilter: func(ctx context.Context, chatID string, it core.Item) bool {
+		ItemFilter: func(ctx context.Context, sub store.Subscription, it core.Item) bool {
 			return false
 		},
 	})
@@ -141,8 +142,8 @@ func TestItemFilterSelective(t *testing.T) {
 	r := New(Config{
 		Name: "test", Source: src, Formatter: fakeFormatter{},
 		Notifier: notifier, Store: st, PollInterval: time.Hour,
-		ItemFilter: func(ctx context.Context, chatID string, it core.Item) bool {
-			return chatID == "allow"
+		ItemFilter: func(ctx context.Context, sub store.Subscription, it core.Item) bool {
+			return sub.ID == "allow"
 		},
 	})
 	r.pollOnce(context.Background())
@@ -180,7 +181,7 @@ func TestItemFilterChangeAfterReject(t *testing.T) {
 	r := New(Config{
 		Name: "test", Source: src, Formatter: fakeFormatter{},
 		Notifier: notifier, Store: st, PollInterval: time.Hour,
-		ItemFilter: func(ctx context.Context, chatID string, it core.Item) bool {
+		ItemFilter: func(ctx context.Context, sub store.Subscription, it core.Item) bool {
 			return allow
 		},
 	})
@@ -196,5 +197,202 @@ func TestItemFilterChangeAfterReject(t *testing.T) {
 	r.pollOnce(context.Background())
 	if len(notifier.sent) != 0 {
 		t.Errorf("second poll: item in bot_seen must not reappear, got %d sends", len(notifier.sent))
+	}
+}
+
+// subFormatter records which (sub, item) pair it was asked to format and
+// returns a sub-specific message. Used to exercise the SubscriberFormatter
+// interface path in the runner.
+type subFormatter struct {
+	calls []string
+}
+
+func (s *subFormatter) Format(it core.Item) core.Message {
+	return core.Message{Text: "base:" + it.Title}
+}
+
+func (s *subFormatter) FormatFor(sub store.Subscription, it core.Item) core.Message {
+	s.calls = append(s.calls, sub.ID+"/"+it.ID)
+	return core.Message{Text: sub.ID + ":" + it.Title}
+}
+
+// TestSubscribeRichMetaRoundTrip verifies Meta survives a write/read cycle
+// and that ActiveSubscriptions returns the same ID/Recipient/Meta.
+func TestSubscribeRichMetaRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	err := st.SubscribeRich(store.Subscription{
+		ID:        "user1:cond42",
+		Recipient: "user1",
+		Meta: map[string]string{
+			"sigungu": "11680",
+			"min_price": "500000000",
+		},
+	})
+	if err != nil {
+		t.Fatalf("SubscribeRich: %v", err)
+	}
+
+	subs, err := st.ActiveSubscriptions()
+	if err != nil {
+		t.Fatalf("ActiveSubscriptions: %v", err)
+	}
+	if len(subs) != 1 {
+		t.Fatalf("expected 1 sub, got %d", len(subs))
+	}
+	got := subs[0]
+	if got.ID != "user1:cond42" {
+		t.Errorf("ID: got %q, want %q", got.ID, "user1:cond42")
+	}
+	if got.Recipient != "user1" {
+		t.Errorf("Recipient: got %q, want %q", got.Recipient, "user1")
+	}
+	if got.Meta["sigungu"] != "11680" || got.Meta["min_price"] != "500000000" {
+		t.Errorf("Meta: got %+v", got.Meta)
+	}
+}
+
+// TestLegacySubscribeBackwardCompat verifies plain Subscribe(chatID) still
+// produces a Subscription whose ID and Recipient are both the chat_id and
+// Meta is empty.
+func TestLegacySubscribeBackwardCompat(t *testing.T) {
+	st := newTestStore(t)
+	if err := st.Subscribe("12345"); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	subs, err := st.ActiveSubscriptions()
+	if err != nil {
+		t.Fatalf("ActiveSubscriptions: %v", err)
+	}
+	if len(subs) != 1 {
+		t.Fatalf("expected 1 sub, got %d", len(subs))
+	}
+	got := subs[0]
+	if got.ID != "12345" || got.Recipient != "12345" {
+		t.Errorf("legacy sub should have ID=Recipient=chat_id, got ID=%q Recipient=%q", got.ID, got.Recipient)
+	}
+	if len(got.Meta) != 0 {
+		t.Errorf("legacy sub should have empty Meta, got %+v", got.Meta)
+	}
+
+	// Legacy ActiveSubscribers() must still work.
+	recipients, err := st.ActiveSubscribers()
+	if err != nil {
+		t.Fatalf("ActiveSubscribers: %v", err)
+	}
+	if len(recipients) != 1 || recipients[0] != "12345" {
+		t.Errorf("ActiveSubscribers: %v", recipients)
+	}
+}
+
+// TestCompositeSubscriptionIDs verifies the bangool-style pattern: one
+// recipient (chat_id) can have multiple subscriptions with different IDs,
+// each tracked independently in bot_sent.
+func TestCompositeSubscriptionIDs(t *testing.T) {
+	st := newTestStore(t)
+	_ = st.SubscribeRich(store.Subscription{ID: "100:cond1", Recipient: "100"})
+	_ = st.SubscribeRich(store.Subscription{ID: "100:cond2", Recipient: "100"})
+
+	src := &fakeSource{items: []core.Item{{ID: "tx1", Title: "Transaction 1"}}}
+	notifier := &fakeNotifier{}
+
+	r := New(Config{
+		Name: "test", Source: src, Formatter: fakeFormatter{},
+		Notifier: notifier, Store: st, PollInterval: time.Hour,
+	})
+	r.pollOnce(context.Background())
+
+	if len(notifier.sent) != 2 {
+		t.Fatalf("expected 2 sends (one per sub) to same recipient, got %d: %v", len(notifier.sent), notifier.sent)
+	}
+	// Both should go to recipient "100"
+	for _, rec := range notifier.sent {
+		if rec[:4] != "100:" {
+			t.Errorf("send should target recipient 100, got %q", rec)
+		}
+	}
+
+	// Both subs should be marked sent for tx1, independently.
+	sent1, _ := st.IsSent("100:cond1", "tx1")
+	sent2, _ := st.IsSent("100:cond2", "tx1")
+	if !sent1 || !sent2 {
+		t.Errorf("both subs should be marked sent: cond1=%v cond2=%v", sent1, sent2)
+	}
+}
+
+// TestSubscriberFormatterInterface verifies that a Formatter implementing
+// SubscriberFormatter gets called with each subscription and its output is
+// used instead of the base Format(item).
+func TestSubscriberFormatterInterface(t *testing.T) {
+	st := newTestStore(t)
+	_ = st.SubscribeRich(store.Subscription{ID: "a", Recipient: "a"})
+	_ = st.SubscribeRich(store.Subscription{ID: "b", Recipient: "b"})
+
+	src := &fakeSource{items: []core.Item{{ID: "i1", Title: "Alpha"}}}
+	notifier := &fakeNotifier{}
+	fmt := &subFormatter{}
+
+	r := New(Config{
+		Name: "test", Source: src, Formatter: fmt,
+		Notifier: notifier, Store: st, PollInterval: time.Hour,
+	})
+	r.pollOnce(context.Background())
+
+	if len(fmt.calls) != 2 {
+		t.Fatalf("FormatFor should be called twice, got %d: %v", len(fmt.calls), fmt.calls)
+	}
+	// Messages should be sub-specific (not the base "base:Alpha" text).
+	if len(notifier.sent) != 2 {
+		t.Fatalf("expected 2 sends, got %d", len(notifier.sent))
+	}
+	// Each sub sees its own ID baked into the message.
+	wantA := "a:a:Alpha"
+	wantB := "b:b:Alpha"
+	gotA, gotB := notifier.sent[0], notifier.sent[1]
+	// order isn't guaranteed, just check both are present
+	if !(gotA == wantA || gotB == wantA) {
+		t.Errorf("missing %q in %v", wantA, notifier.sent)
+	}
+	if !(gotA == wantB || gotB == wantB) {
+		t.Errorf("missing %q in %v", wantB, notifier.sent)
+	}
+}
+
+// TestItemFilterWithSubscriptionMeta verifies a filter can consume Meta
+// from a Subscription to make per-sub decisions without external lookups.
+func TestItemFilterWithSubscriptionMeta(t *testing.T) {
+	st := newTestStore(t)
+	_ = st.SubscribeRich(store.Subscription{
+		ID: "sub1", Recipient: "chat1",
+		Meta: map[string]string{"min_price": "100"},
+	})
+	_ = st.SubscribeRich(store.Subscription{
+		ID: "sub2", Recipient: "chat2",
+		Meta: map[string]string{"min_price": "1000"},
+	})
+
+	// Item carries a "price" in Meta too.
+	src := &fakeSource{items: []core.Item{{
+		ID: "tx1", Title: "500 deal",
+		Meta: map[string]string{"price": "500"},
+	}}}
+	notifier := &fakeNotifier{}
+
+	r := New(Config{
+		Name: "test", Source: src, Formatter: fakeFormatter{},
+		Notifier: notifier, Store: st, PollInterval: time.Hour,
+		ItemFilter: func(ctx context.Context, sub store.Subscription, it core.Item) bool {
+			itemPrice, _ := strconv.Atoi(it.Meta["price"])
+			minPrice, _ := strconv.Atoi(sub.Meta["min_price"])
+			return itemPrice >= minPrice
+		},
+	})
+	r.pollOnce(context.Background())
+
+	if len(notifier.sent) != 1 {
+		t.Fatalf("expected 1 send (sub1 accepts, sub2 rejects), got %d: %v", len(notifier.sent), notifier.sent)
+	}
+	if notifier.sent[0][:5] != "chat1" {
+		t.Errorf("expected chat1 recipient, got %q", notifier.sent[0])
 	}
 }

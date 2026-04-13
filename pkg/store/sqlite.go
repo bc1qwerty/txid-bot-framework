@@ -3,12 +3,29 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// Subscription is a single dispatch slot. A user may have multiple
+// subscriptions under one bot_key when each subscription carries its
+// own filter state (per-condition bots like bangool/bid-alert).
+//
+//	ID        - opaque, unique within a bot_key. For simple one-per-user
+//	            bots this is just the chat_id as a string.
+//	Recipient - the actual endpoint (e.g., Telegram chat_id as a string).
+//	            Multiple Subscriptions can share a Recipient.
+//	Meta      - arbitrary filter/format state stored as JSON. The framework
+//	            only persists it verbatim; interpretation is the bot's job.
+type Subscription struct {
+	ID        string
+	Recipient string
+	Meta      map[string]string
+}
 
 // Store handles subscribers, sent alerts, and custom bot state.
 type Store struct {
@@ -80,17 +97,123 @@ func (s *Store) migrate() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_bot_sent_at ON bot_sent(sent_at);
 	`
-	_, err := s.db.Exec(schema)
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+
+	// Lazy migration: add Subscription fields to bot_subscribers if they are
+	// missing. Older stores created before the Subscription abstraction will
+	// silently gain these columns on first open. An empty recipient column
+	// means "use chat_id as the recipient" (backward compat).
+	if err := s.addColumnIfMissing("bot_subscribers", "recipient", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate recipient: %w", err)
+	}
+	if err := s.addColumnIfMissing("bot_subscribers", "meta", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
+		return fmt.Errorf("migrate meta: %w", err)
+	}
+	return nil
+}
+
+// addColumnIfMissing runs ALTER TABLE ADD COLUMN only when the column is
+// absent from table_info. sqlite has no IF NOT EXISTS for ADD COLUMN.
+func (s *Store) addColumnIfMissing(table, column, colDef string) error {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil // already present
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, colDef))
 	return err
 }
 
-// Subscribe adds a chat to this bot's subscribers.
+// Subscribe adds a chat to this bot's subscribers. Equivalent to
+// SubscribeRich with Subscription{ID: chatID, Recipient: chatID}.
 func (s *Store) Subscribe(chatID string) error {
+	return s.SubscribeRich(Subscription{ID: chatID, Recipient: chatID})
+}
+
+// SubscribeRich inserts or updates a Subscription, preserving the opaque
+// ID, recipient, and meta fields. Use this when a user can hold multiple
+// subscriptions with different filter state.
+//
+// For simple bots, prefer Subscribe(chatID) which delegates here with
+// ID = Recipient = chatID and empty Meta.
+func (s *Store) SubscribeRich(sub Subscription) error {
+	if sub.ID == "" {
+		return fmt.Errorf("subscription ID is required")
+	}
+	recipient := sub.Recipient
+	if recipient == "" {
+		recipient = sub.ID
+	}
+	metaJSON := "{}"
+	if len(sub.Meta) > 0 {
+		b, err := json.Marshal(sub.Meta)
+		if err != nil {
+			return fmt.Errorf("marshal meta: %w", err)
+		}
+		metaJSON = string(b)
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO bot_subscribers (bot_key, chat_id, active) VALUES (?, ?, 1)
-		 ON CONFLICT(bot_key, chat_id) DO UPDATE SET active = 1, subscribed_at = unixepoch()`,
-		s.botKey, chatID)
+		`INSERT INTO bot_subscribers (bot_key, chat_id, recipient, meta, active) VALUES (?, ?, ?, ?, 1)
+		 ON CONFLICT(bot_key, chat_id) DO UPDATE SET
+		     recipient = excluded.recipient,
+		     meta = excluded.meta,
+		     active = 1,
+		     subscribed_at = unixepoch()`,
+		s.botKey, sub.ID, recipient, metaJSON)
 	return err
+}
+
+// ActiveSubscriptions returns all active Subscriptions for this bot_key.
+// Older rows with an empty recipient fall back to their chat_id (legacy
+// behavior: the recipient IS the opaque ID).
+func (s *Store) ActiveSubscriptions() ([]Subscription, error) {
+	rows, err := s.db.Query(
+		`SELECT chat_id, recipient, meta FROM bot_subscribers
+		 WHERE bot_key = ? AND active = 1`,
+		s.botKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Subscription
+	for rows.Next() {
+		var sub Subscription
+		var recipient, metaJSON sql.NullString
+		if err := rows.Scan(&sub.ID, &recipient, &metaJSON); err != nil {
+			return nil, err
+		}
+		if recipient.Valid && recipient.String != "" {
+			sub.Recipient = recipient.String
+		} else {
+			sub.Recipient = sub.ID
+		}
+		if metaJSON.Valid && metaJSON.String != "" && metaJSON.String != "{}" {
+			m := make(map[string]string)
+			if err := json.Unmarshal([]byte(metaJSON.String), &m); err == nil {
+				sub.Meta = m
+			}
+		}
+		out = append(out, sub)
+	}
+	return out, rows.Err()
 }
 
 // Unsubscribe marks a chat as inactive.
