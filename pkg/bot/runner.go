@@ -47,6 +47,23 @@ type Config struct {
 	// Useful for fan-out to external channels (notification hub, logs).
 	// A non-nil return is logged, not fatal - dispatch still proceeds.
 	OnNewItem func(ctx context.Context, item core.Item) error
+
+	// ItemFilter decides whether a given subscriber should receive a given
+	// item. Return true to deliver, false to skip.
+	//
+	// When nil, all items are delivered to all active subscribers (default
+	// broadcast behavior). When non-nil, filtered-out (item, chatID) pairs
+	// are NOT marked as sent, so a later filter change can deliver them.
+	//
+	// Performance note: this runs O(items × subscribers) per poll. Load any
+	// per-subscriber filter state into a closure at poll start rather than
+	// querying inside the filter body. Example:
+	//
+	//	Config{ ItemFilter: func(ctx context.Context, chatID string, it core.Item) bool {
+	//		// closure over pre-loaded map[chatID]filterCond
+	//		return matches(conds[chatID], it)
+	//	}}
+	ItemFilter func(ctx context.Context, chatID string, item core.Item) bool
 }
 
 // Runner executes the poll loop.
@@ -153,6 +170,12 @@ func (r *Runner) pollOnce(ctx context.Context) {
 		for _, chatID := range subs {
 			sent, err := r.cfg.Store.IsSent(chatID, item.ID)
 			if err != nil || sent {
+				continue
+			}
+			if r.cfg.ItemFilter != nil && !r.cfg.ItemFilter(ctx, chatID, item) {
+				// Intentionally NOT marking sent: if the filter condition
+				// changes before the item ages out of bot_seen, we want the
+				// next poll to re-evaluate and potentially deliver it.
 				continue
 			}
 			if err := r.cfg.Notifier.Send(ctx, chatID, msg); err != nil {
