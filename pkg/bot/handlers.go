@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"strconv"
+	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -14,13 +15,24 @@ import (
 // Return value: response text (empty = no reply).
 type CommandHandler func(ctx context.Context, chatID int64, args string) string
 
+// CallbackHandler handles a Telegram callback query (inline button press).
+// Return a non-empty string to edit the message with that text.
+// Return "" to leave the message as is; handler is responsible for any UI updates.
+type CallbackHandler func(ctx context.Context, query *tgbotapi.CallbackQuery) string
+
+// SubscribeHook is called asynchronously after a successful /subscribe.
+// Useful for backlog delivery to new subscribers.
+type SubscribeHook func(ctx context.Context, chatID int64)
+
 // TelegramDispatcher routes Telegram updates to subscribe/unsubscribe
 // and any custom command handlers registered by the bot.
 type TelegramDispatcher struct {
-	tg       *notify.Telegram
-	store    *store.Store
-	handlers map[string]CommandHandler
-	messages DispatcherMessages
+	tg           *notify.Telegram
+	store        *store.Store
+	handlers     map[string]CommandHandler
+	callbacks    map[string]CallbackHandler
+	messages     DispatcherMessages
+	onSubscribe  SubscribeHook
 }
 
 // DispatcherMessages are the localizable strings.
@@ -46,11 +58,25 @@ func NewTelegramDispatcher(tg *notify.Telegram, s *store.Store, msgs DispatcherM
 		msgs.Welcome = "안녕하세요! /subscribe 로 알림을 받을 수 있습니다."
 	}
 	return &TelegramDispatcher{
-		tg:       tg,
-		store:    s,
-		handlers: make(map[string]CommandHandler),
-		messages: msgs,
+		tg:        tg,
+		store:     s,
+		handlers:  make(map[string]CommandHandler),
+		callbacks: make(map[string]CallbackHandler),
+		messages:  msgs,
 	}
+}
+
+// HandleCallback registers a callback handler keyed by prefix.
+// When a callback query arrives with data starting with "prefix:", the
+// handler is invoked with the full query.
+func (d *TelegramDispatcher) HandleCallback(prefix string, h CallbackHandler) {
+	d.callbacks[prefix] = h
+}
+
+// OnSubscribe registers a hook invoked after a /subscribe succeeds.
+// The hook runs in a goroutine so it does not block the dispatcher.
+func (d *TelegramDispatcher) OnSubscribe(hook SubscribeHook) {
+	d.onSubscribe = hook
 }
 
 // Handle registers a custom command handler (without the leading slash).
@@ -72,6 +98,10 @@ func (d *TelegramDispatcher) Start(ctx context.Context) error {
 	}()
 
 	for update := range updates {
+		if update.CallbackQuery != nil {
+			d.handleCallback(ctx, update.CallbackQuery)
+			continue
+		}
 		if update.Message == nil {
 			continue
 		}
@@ -80,6 +110,29 @@ func (d *TelegramDispatcher) Start(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// handleCallback routes a callback query to a registered prefix handler.
+// Data format convention: "<prefix>:<payload>".
+func (d *TelegramDispatcher) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
+	// Acknowledge immediately so the client dismisses the spinner.
+	_, _ = d.tg.API().Request(tgbotapi.NewCallback(q.ID, ""))
+
+	data := q.Data
+	prefix := data
+	if i := strings.IndexByte(data, ':'); i >= 0 {
+		prefix = data[:i]
+	}
+	h, ok := d.callbacks[prefix]
+	if !ok {
+		return
+	}
+	reply := h(ctx, q)
+	if reply == "" || q.Message == nil {
+		return
+	}
+	edit := tgbotapi.NewEditMessageText(q.Message.Chat.ID, q.Message.MessageID, reply)
+	_, _ = d.tg.API().Send(edit)
 }
 
 func (d *TelegramDispatcher) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
@@ -96,6 +149,9 @@ func (d *TelegramDispatcher) handleCommand(ctx context.Context, msg *tgbotapi.Me
 			reply = "구독 실패: " + err.Error()
 		} else {
 			reply = d.messages.Subscribed
+			if d.onSubscribe != nil {
+				go d.onSubscribe(ctx, chatID)
+			}
 		}
 	case "unsubscribe", "stop":
 		if err := d.store.Unsubscribe(strconv.FormatInt(chatID, 10)); err != nil {

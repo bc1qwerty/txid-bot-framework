@@ -41,6 +41,12 @@ type Config struct {
 	// OnError is called when polling hits an error (optional).
 	// Useful for sending admin notifications.
 	OnError func(err error)
+
+	// OnNewItem is called for each newly-fetched item before dispatch.
+	// Runs after dedup filtering, once per item regardless of subscriber count.
+	// Useful for fan-out to external channels (notification hub, logs).
+	// A non-nil return is logged, not fatal - dispatch still proceeds.
+	OnNewItem func(ctx context.Context, item core.Item) error
 }
 
 // Runner executes the poll loop.
@@ -137,6 +143,11 @@ func (r *Runner) pollOnce(ctx context.Context) {
 
 	// Notify
 	for _, item := range newItems {
+		if r.cfg.OnNewItem != nil {
+			if err := r.cfg.OnNewItem(ctx, item); err != nil {
+				r.log.Printf("OnNewItem hook error (item=%s): %v", item.ID, err)
+			}
+		}
 		msg := r.cfg.Formatter.Format(item)
 
 		for _, chatID := range subs {
