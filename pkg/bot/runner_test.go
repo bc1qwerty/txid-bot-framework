@@ -430,3 +430,94 @@ func TestHandleTextRegistration(t *testing.T) {
 	}
 	_ = called
 }
+
+// fakeErrSource always returns the same error so we can verify the
+// ErrorThrottle behavior in invokeOnError.
+type fakeErrSource struct {
+	err error
+}
+
+func (f *fakeErrSource) Name() string                                  { return "errsrc" }
+func (f *fakeErrSource) Fetch(ctx context.Context) ([]core.Item, error) { return nil, f.err }
+
+// TestErrorThrottleSuppressesDuplicates verifies that two consecutive
+// pollOnce calls hitting the same error fire OnError only once when
+// ErrorThrottle is set.
+func TestErrorThrottleSuppressesDuplicates(t *testing.T) {
+	st := newTestStore(t)
+	src := &fakeErrSource{err: errFake("nope")}
+	notifier := &fakeNotifier{}
+
+	var fired int
+	r := New(Config{
+		Name: "test", Source: src, Formatter: fakeFormatter{},
+		Notifier: notifier, Store: st, PollInterval: time.Hour,
+		ErrorThrottle: time.Hour,
+		OnError:       func(err error) { fired++ },
+	})
+
+	r.pollOnce(context.Background())
+	r.pollOnce(context.Background())
+	r.pollOnce(context.Background())
+
+	if fired != 1 {
+		t.Errorf("expected 1 OnError fire (3 polls coalesced), got %d", fired)
+	}
+}
+
+// TestErrorThrottleAllowsDifferentErrors verifies that distinct error
+// strings break through the throttle (each fires once).
+func TestErrorThrottleAllowsDifferentErrors(t *testing.T) {
+	st := newTestStore(t)
+	src := &fakeErrSource{}
+	notifier := &fakeNotifier{}
+
+	var fired []string
+	r := New(Config{
+		Name: "test", Source: src, Formatter: fakeFormatter{},
+		Notifier: notifier, Store: st, PollInterval: time.Hour,
+		ErrorThrottle: time.Hour,
+		OnError:       func(err error) { fired = append(fired, err.Error()) },
+	})
+
+	src.err = errFake("first")
+	r.pollOnce(context.Background())
+	src.err = errFake("second")
+	r.pollOnce(context.Background())
+	src.err = errFake("first") // back to first - within window so suppressed
+	r.pollOnce(context.Background())
+
+	// last fire was "second", lastErrMsg="second". Now we get "first"
+	// which differs from "second" so it fires.
+	if len(fired) != 3 {
+		t.Errorf("expected 3 fires (each distinct), got %d: %v", len(fired), fired)
+	}
+}
+
+// TestErrorThrottleDisabledByDefault verifies that with ErrorThrottle=0
+// every error fires (no coalescing) - existing behavior.
+func TestErrorThrottleDisabledByDefault(t *testing.T) {
+	st := newTestStore(t)
+	src := &fakeErrSource{err: errFake("always")}
+	notifier := &fakeNotifier{}
+
+	var fired int
+	r := New(Config{
+		Name: "test", Source: src, Formatter: fakeFormatter{},
+		Notifier: notifier, Store: st, PollInterval: time.Hour,
+		// ErrorThrottle: 0 (default)
+		OnError: func(err error) { fired++ },
+	})
+
+	r.pollOnce(context.Background())
+	r.pollOnce(context.Background())
+
+	if fired != 2 {
+		t.Errorf("default throttle should fire every error, got %d", fired)
+	}
+}
+
+// errFake is a tiny error type so we don't drag in fmt.Errorf each time.
+type errFake string
+
+func (e errFake) Error() string { return string(e) }

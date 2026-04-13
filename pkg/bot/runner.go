@@ -42,6 +42,13 @@ type Config struct {
 	// Useful for sending admin notifications.
 	OnError func(err error)
 
+	// ErrorThrottle coalesces consecutive identical errors so a long
+	// outage does not spam the OnError sink. When non-zero, an error
+	// whose .Error() string matches the previous fire within this window
+	// is silently suppressed (the runner still logs it locally).
+	// Zero (default) fires every error - existing behavior.
+	ErrorThrottle time.Duration
+
 	// OnNewItem is called for each newly-fetched item before dispatch.
 	// Runs after dedup filtering, once per item regardless of subscriber count.
 	// Useful for fan-out to external channels (notification hub, logs).
@@ -79,6 +86,12 @@ type SubscriberFormatter interface {
 type Runner struct {
 	cfg Config
 	log *log.Logger
+
+	// Error throttling state. Not protected by a mutex because pollOnce
+	// is called from a single goroutine in production (Run's ticker loop)
+	// and tests drive it serially.
+	lastErrMsg  string
+	lastErrTime time.Time
 }
 
 // New creates a Runner from config.
@@ -129,9 +142,7 @@ func (r *Runner) pollOnce(ctx context.Context) {
 	items, err := r.cfg.Source.Fetch(ctx)
 	if err != nil {
 		r.log.Printf("fetch error: %v", err)
-		if r.cfg.OnError != nil {
-			r.cfg.OnError(err)
-		}
+		r.invokeOnError(err)
 		return
 	}
 
@@ -213,6 +224,25 @@ func (r *Runner) pollOnce(ctx context.Context) {
 			r.log.Printf("mark seen error: %v", err)
 		}
 	}
+}
+
+
+// invokeOnError fires the user-supplied OnError hook with optional
+// throttling. When ErrorThrottle is set, identical consecutive errors
+// inside the window are suppressed (still logged locally above).
+func (r *Runner) invokeOnError(err error) {
+	if r.cfg.OnError == nil || err == nil {
+		return
+	}
+	if r.cfg.ErrorThrottle > 0 {
+		msg := err.Error()
+		if msg == r.lastErrMsg && time.Since(r.lastErrTime) < r.cfg.ErrorThrottle {
+			return
+		}
+		r.lastErrMsg = msg
+		r.lastErrTime = time.Now()
+	}
+	r.cfg.OnError(err)
 }
 
 // runCleanup periodically purges old records.
