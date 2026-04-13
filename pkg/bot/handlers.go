@@ -140,6 +140,18 @@ func (d *TelegramDispatcher) handleCommand(ctx context.Context, msg *tgbotapi.Me
 	cmd := msg.Command()
 	args := msg.CommandArguments()
 
+	// Registered handlers take precedence over built-in defaults.
+	// This lets bots override /start, /subscribe, /stop for richer UX
+	// (custom welcome, menu keyboards, backlog delivery, etc.).
+	if h, ok := d.handlers[cmd]; ok {
+		reply := h(ctx, chatID, args)
+		if reply != "" {
+			out := tgbotapi.NewMessage(chatID, reply)
+			_, _ = d.tg.API().Send(out)
+		}
+		return
+	}
+
 	var reply string
 	switch cmd {
 	case "start":
