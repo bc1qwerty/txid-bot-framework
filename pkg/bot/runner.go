@@ -55,6 +55,18 @@ type Config struct {
 	// A non-nil return is logged, not fatal - dispatch still proceeds.
 	OnNewItem func(ctx context.Context, item core.Item) error
 
+	// OnItemMatched is called exactly once per newly-fetched item, but only
+	// if at least one subscription's ItemFilter returned true for that item.
+	// It fires after all per-subscription Send attempts have completed.
+	//
+	// Use this (instead of OnNewItem) for side-effects that should be
+	// skipped when an item would not reach any user, for example pushing
+	// to a notification dashboard that should stay consistent with what
+	// was actually delivered on Telegram.
+	//
+	// A non-nil return is logged, not fatal.
+	OnItemMatched func(ctx context.Context, item core.Item) error
+
 	// ItemFilter decides whether a given Subscription should receive a
 	// given item. Return true to deliver, false to skip.
 	//
@@ -196,6 +208,7 @@ func (r *Runner) pollOnce(ctx context.Context) {
 			baseMsg = r.cfg.Formatter.Format(item)
 		}
 
+		var matched bool
 		for _, sub := range subs {
 			sent, err := r.cfg.Store.IsSent(sub.ID, item.ID)
 			if err != nil || sent {
@@ -215,8 +228,15 @@ func (r *Runner) pollOnce(ctx context.Context) {
 				r.log.Printf("send error sub=%s recipient=%s: %v", sub.ID, sub.Recipient, err)
 				continue
 			}
+			matched = true
 			if err := r.cfg.Store.MarkSent(sub.ID, item.ID); err != nil {
 				r.log.Printf("mark sent error: %v", err)
+			}
+		}
+
+		if matched && r.cfg.OnItemMatched != nil {
+			if err := r.cfg.OnItemMatched(ctx, item); err != nil {
+				r.log.Printf("OnItemMatched hook error (item=%s): %v", item.ID, err)
 			}
 		}
 

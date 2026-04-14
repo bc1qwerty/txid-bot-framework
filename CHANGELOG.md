@@ -3,6 +3,27 @@
 All notable changes to txid-bot-framework. The project is pre-1.0 and
 breaking changes are tracked here so downstream bots know what to update.
 
+## v0.3.0
+
+### Added
+
+- **`Config.OnItemMatched`** hook - per-new-item callback that fires
+  once per item, but only if at least one subscription's `ItemFilter`
+  returned true AND the `Notifier.Send` for that subscription
+  succeeded. Runs after the entire per-subscription inner loop has
+  finished. Unlike `OnNewItem` (which fires unconditionally before
+  dispatch), `OnItemMatched` is the right place for side-effects that
+  should stay consistent with what the user actually received, e.g.
+  pushing to a notification dashboard. Returning a non-nil error is
+  logged but does not abort subsequent items.
+
+### Backward compatibility
+
+- `OnNewItem` still fires unconditionally before the per-sub loop. Bots
+  that rely on the old pre-dispatch fire-and-forget semantics do not
+  need to change. Bots that need post-delivery consistency should
+  switch from `OnNewItem` to `OnItemMatched`.
+
 ## Unreleased (local main, 5 commits ahead of origin)
 
 These commits live on the local main branch and have not been pushed.
