@@ -164,6 +164,15 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 
+	// Heartbeat ticker — keeps ~/.txid-bots/heartbeats/<bot> fresh
+	// even between polls. dash.txid.uk does not read this file directly,
+	// but ssh-based liveness checks (and any future agent) rely on it.
+	// Skip for one-shot runs (PollInterval==0) and when HeartbeatDir is
+	// empty.
+	if r.cfg.HeartbeatDir != "" && r.cfg.PollInterval > 0 {
+		go r.heartbeatTicker(ctx)
+	}
+
 	// Initial poll
 	r.PollOnce(ctx)
 
@@ -358,6 +367,27 @@ func (r *Runner) invokeOnError(err error) {
 		r.lastErrTime = time.Now()
 	}
 	r.cfg.OnError(err)
+}
+
+// heartbeatTicker pings the liveness file every 15 minutes so a
+// daemon with a long PollInterval (food-recall: 4h) does not look
+// stale between polls. Cheap (one writeFile).
+func (r *Runner) heartbeatTicker(ctx context.Context) {
+	tick := 15 * time.Minute
+	if r.cfg.PollInterval < tick {
+		// No point ticking faster than polling already does.
+		return
+	}
+	t := time.NewTicker(tick)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			archive.RecordHeartbeat(r.cfg.HeartbeatDir, r.cfg.Name)
+		}
+	}
 }
 
 // runCleanup periodically purges old records.

@@ -7,13 +7,27 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 )
 
 // MultiSource merges multiple sources into one. A single sub-source
 // failure does NOT abort the merged fetch — the Runner is contracted
 // to dispatch whatever items came back even when err != nil.
+//
+// Per-source errors are de-duplicated against the last reported
+// message so a long-running outage (e.g. a permanently flaky source
+// returning the same 404 every poll) does not spam the runner log.
+// The first occurrence is always reported; subsequent identical
+// errors are suppressed until either the message changes or one
+// hour has passed.
 type MultiSource struct {
 	Sources []Source
+
+	mu       sync.Mutex
+	lastErrs map[string]struct {
+		msg string
+		at  time.Time
+	}
 }
 
 func NewMultiSource(sources ...Source) *MultiSource {
@@ -44,7 +58,9 @@ func (ms *MultiSource) Fetch(ctx context.Context) ([]Item, error) {
 	for _, s := range ms.Sources {
 		items, err := s.Fetch(ctx)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("source %s: %w", s.Name(), err))
+			if ms.shouldReport(s.Name(), err.Error()) {
+				errs = append(errs, fmt.Errorf("source %s: %w", s.Name(), err))
+			}
 			// Still merge whatever items the sub-source returned — some
 			// scrapers yield partial results before reporting an error.
 		}
@@ -55,6 +71,29 @@ func (ms *MultiSource) Fetch(ctx context.Context) ([]Item, error) {
 		return allItems, errors.Join(errs...)
 	}
 	return allItems, nil
+}
+
+// shouldReport returns true the first time a given (source, message)
+// pair is seen, and again only after one hour of repetition. Distinct
+// messages always pass through.
+func (ms *MultiSource) shouldReport(source, msg string) bool {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	if ms.lastErrs == nil {
+		ms.lastErrs = make(map[string]struct {
+			msg string
+			at  time.Time
+		})
+	}
+	prev, ok := ms.lastErrs[source]
+	if ok && prev.msg == msg && time.Since(prev.at) < time.Hour {
+		return false
+	}
+	ms.lastErrs[source] = struct {
+		msg string
+		at  time.Time
+	}{msg: msg, at: time.Now()}
+	return true
 }
 
 // MultiNotifier delivers a message to multiple delivery channels in
