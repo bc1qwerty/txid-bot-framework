@@ -35,6 +35,15 @@ type Config struct {
 	// where a source returns a large backlog. 0 means unlimited.
 	MaxItemsPerPoll int
 
+	// BootstrapMode runs one fetch and marks every returned item seen
+	// WITHOUT dispatching. Use this on the first deploy of the framework
+	// after replacing a legacy state file (processed.json, last_post_ids.
+	// json, or a different SQLite schema): otherwise the empty bot_seen
+	// table treats every existing source item as new and floods the
+	// channel. After a successful bootstrap run, restart the service
+	// without the flag.
+	BootstrapMode bool
+
 	// Source fetches new items.
 	Source core.Source
 
@@ -216,6 +225,19 @@ func (r *Runner) PollOnce(ctx context.Context) {
 
 	if len(newItems) == 0 {
 		r.log.Printf("no new items")
+		return
+	}
+
+	// Bootstrap mode — mark every new item seen and skip dispatch entirely.
+	// This is the safe migration path from a legacy state file to the
+	// framework's bot_seen table on a freshly initialized DB.
+	if r.cfg.BootstrapMode {
+		r.log.Printf("BOOTSTRAP: marking %d items seen without dispatch", len(newItems))
+		for _, it := range newItems {
+			if err := r.cfg.Store.MarkSeen(source, it.ID); err != nil {
+				r.log.Printf("bootstrap mark seen error: %v", err)
+			}
+		}
 		return
 	}
 
