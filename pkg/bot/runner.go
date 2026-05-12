@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/bc1qwerty/txid-bot-framework/pkg/archive"
 	"github.com/bc1qwerty/txid-bot-framework/pkg/core"
 	"github.com/bc1qwerty/txid-bot-framework/pkg/store"
 )
@@ -15,6 +16,24 @@ import (
 type Config struct {
 	// Name identifies this bot for logs and state namespacing.
 	Name string
+
+	// ArchiveDir is the base directory for raw JSONL backups. Each bot
+	// gets a subdirectory under it. Leave empty to disable archiving.
+	ArchiveDir string
+
+	// HeartbeatDir is where PollOnce writes a per-bot liveness timestamp
+	// before each fetch. Leave empty to disable heartbeats.
+	HeartbeatDir string
+
+	// DisableArchiving forces archiving off even when ArchiveDir is set.
+	// Prefer leaving ArchiveDir empty; this flag exists for back-compat.
+	DisableArchiving bool
+
+	// MaxItemsPerPoll caps how many newly-discovered items are dispatched
+	// per poll. Items beyond the cap are marked seen — they will NOT be
+	// retried later. Use this to prevent flood after extended downtime
+	// where a source returns a large backlog. 0 means unlimited.
+	MaxItemsPerPoll int
 
 	// Source fetches new items.
 	Source core.Source
@@ -96,8 +115,9 @@ type SubscriberFormatter interface {
 
 // Runner executes the poll loop.
 type Runner struct {
-	cfg Config
-	log *log.Logger
+	cfg      Config
+	log      *log.Logger
+	archiver *archive.Archiver // nil when ArchiveDir is empty or DisableArchiving
 
 	// Error throttling state. Not protected by a mutex because pollOnce
 	// is called from a single goroutine in production (Run's ticker loop)
@@ -108,10 +128,14 @@ type Runner struct {
 
 // New creates a Runner from config.
 func New(cfg Config) *Runner {
-	return &Runner{
+	r := &Runner{
 		cfg: cfg,
 		log: log.New(log.Writer(), "["+cfg.Name+"] ", log.LstdFlags),
 	}
+	if cfg.ArchiveDir != "" && !cfg.DisableArchiving {
+		r.archiver = archive.NewLocalArchiver(cfg.ArchiveDir)
+	}
+	return r
 }
 
 // Run starts the poll loop and blocks until ctx is cancelled.
@@ -127,7 +151,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	// Initial poll
-	r.pollOnce(ctx)
+	r.PollOnce(ctx)
 
 	// Start cleanup goroutine
 	go r.runCleanup(ctx)
@@ -141,21 +165,35 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.log.Println("runner stopped")
 			return ctx.Err()
 		case <-ticker.C:
-			r.pollOnce(ctx)
+			r.PollOnce(ctx)
 		}
 	}
 }
 
-// pollOnce runs a single fetch-filter-notify cycle.
-func (r *Runner) pollOnce(ctx context.Context) {
+// PollOnce runs a single fetch-filter-notify cycle.
+func (r *Runner) PollOnce(ctx context.Context) {
+	archive.RecordHeartbeat(r.cfg.HeartbeatDir, r.cfg.Name)
 	source := r.cfg.Source.Name()
 	r.log.Printf("polling source=%s", source)
 
 	items, err := r.cfg.Source.Fetch(ctx)
 	if err != nil {
+		// Partial success is possible for composite sources (MultiSource):
+		// we still dispatch whatever was returned so a single failing
+		// sub-source does not block all the others. err is surfaced
+		// through OnError for observability.
 		r.log.Printf("fetch error: %v", err)
 		r.invokeOnError(err)
-		return
+		if len(items) == 0 {
+			return
+		}
+		r.log.Printf("fetch partial success: dispatching %d items despite errors", len(items))
+	}
+
+	if r.archiver != nil {
+		if err := r.archiver.Archive(r.cfg.Name, items); err != nil {
+			r.log.Printf("archiving failed: %v", err)
+		}
 	}
 
 	if len(items) == 0 {
@@ -179,6 +217,21 @@ func (r *Runner) pollOnce(ctx context.Context) {
 	if len(newItems) == 0 {
 		r.log.Printf("no new items")
 		return
+	}
+
+	// Backlog cap — when configured, drop oldest excess and mark them seen
+	// so they do not re-enter the queue next poll. This is the framework
+	// equivalent of legacy "backlogCap" controls in pre-merger bots.
+	if r.cfg.MaxItemsPerPoll > 0 && len(newItems) > r.cfg.MaxItemsPerPoll {
+		excess := newItems[r.cfg.MaxItemsPerPoll:]
+		newItems = newItems[:r.cfg.MaxItemsPerPoll]
+		r.log.Printf("backlog cap: dispatching %d, marking %d excess as seen",
+			len(newItems), len(excess))
+		for _, it := range excess {
+			if err := r.cfg.Store.MarkSeen(source, it.ID); err != nil {
+				r.log.Printf("mark seen (cap excess) error: %v", err)
+			}
+		}
 	}
 
 	// Get subscriptions (the framework iterates these, not raw chat_ids,

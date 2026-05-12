@@ -64,7 +64,7 @@ func TestOnNewItemHook(t *testing.T) {
 			return nil
 		},
 	})
-	r.pollOnce(context.Background())
+	r.PollOnce(context.Background())
 	if len(hookCalls) != 2 {
 		t.Fatalf("expected 2 OnNewItem calls, got %d", len(hookCalls))
 	}
@@ -85,7 +85,7 @@ func TestItemFilterNil(t *testing.T) {
 		Notifier: notifier, Store: st, PollInterval: time.Hour,
 		// ItemFilter: nil (default)
 	})
-	r.pollOnce(context.Background())
+	r.PollOnce(context.Background())
 
 	if len(notifier.sent) != 2 {
 		t.Errorf("expected 2 sends (broadcast), got %d", len(notifier.sent))
@@ -110,7 +110,7 @@ func TestItemFilterRejectAll(t *testing.T) {
 			return false
 		},
 	})
-	r.pollOnce(context.Background())
+	r.PollOnce(context.Background())
 
 	if len(notifier.sent) != 0 {
 		t.Errorf("expected 0 sends (all filtered), got %d", len(notifier.sent))
@@ -148,7 +148,7 @@ func TestItemFilterSelective(t *testing.T) {
 			return sub.ID == "allow"
 		},
 	})
-	r.pollOnce(context.Background())
+	r.PollOnce(context.Background())
 
 	if len(notifier.sent) != 1 {
 		t.Fatalf("expected 1 send, got %d: %v", len(notifier.sent), notifier.sent)
@@ -187,7 +187,7 @@ func TestItemFilterChangeAfterReject(t *testing.T) {
 			return allow
 		},
 	})
-	r.pollOnce(context.Background())
+	r.PollOnce(context.Background())
 	if len(notifier.sent) != 0 {
 		t.Errorf("first poll: expected 0 sends, got %d", len(notifier.sent))
 	}
@@ -196,7 +196,7 @@ func TestItemFilterChangeAfterReject(t *testing.T) {
 	// same item, but bot_seen filtering in runner drops it before the
 	// filter even sees it - so the subscriber still gets nothing.
 	allow = true
-	r.pollOnce(context.Background())
+	r.PollOnce(context.Background())
 	if len(notifier.sent) != 0 {
 		t.Errorf("second poll: item in bot_seen must not reappear, got %d sends", len(notifier.sent))
 	}
@@ -302,7 +302,7 @@ func TestCompositeSubscriptionIDs(t *testing.T) {
 		Name: "test", Source: src, Formatter: fakeFormatter{},
 		Notifier: notifier, Store: st, PollInterval: time.Hour,
 	})
-	r.pollOnce(context.Background())
+	r.PollOnce(context.Background())
 
 	if len(notifier.sent) != 2 {
 		t.Fatalf("expected 2 sends (one per sub) to same recipient, got %d: %v", len(notifier.sent), notifier.sent)
@@ -338,7 +338,7 @@ func TestSubscriberFormatterInterface(t *testing.T) {
 		Name: "test", Source: src, Formatter: fmt,
 		Notifier: notifier, Store: st, PollInterval: time.Hour,
 	})
-	r.pollOnce(context.Background())
+	r.PollOnce(context.Background())
 
 	if len(fmt.calls) != 2 {
 		t.Fatalf("FormatFor should be called twice, got %d: %v", len(fmt.calls), fmt.calls)
@@ -389,7 +389,7 @@ func TestItemFilterWithSubscriptionMeta(t *testing.T) {
 			return itemPrice >= minPrice
 		},
 	})
-	r.pollOnce(context.Background())
+	r.PollOnce(context.Background())
 
 	if len(notifier.sent) != 1 {
 		t.Fatalf("expected 1 send (sub1 accepts, sub2 rejects), got %d: %v", len(notifier.sent), notifier.sent)
@@ -441,7 +441,7 @@ func (f *fakeErrSource) Name() string                                  { return 
 func (f *fakeErrSource) Fetch(ctx context.Context) ([]core.Item, error) { return nil, f.err }
 
 // TestErrorThrottleSuppressesDuplicates verifies that two consecutive
-// pollOnce calls hitting the same error fire OnError only once when
+// PollOnce calls hitting the same error fire OnError only once when
 // ErrorThrottle is set.
 func TestErrorThrottleSuppressesDuplicates(t *testing.T) {
 	st := newTestStore(t)
@@ -456,9 +456,9 @@ func TestErrorThrottleSuppressesDuplicates(t *testing.T) {
 		OnError:       func(err error) { fired++ },
 	})
 
-	r.pollOnce(context.Background())
-	r.pollOnce(context.Background())
-	r.pollOnce(context.Background())
+	r.PollOnce(context.Background())
+	r.PollOnce(context.Background())
+	r.PollOnce(context.Background())
 
 	if fired != 1 {
 		t.Errorf("expected 1 OnError fire (3 polls coalesced), got %d", fired)
@@ -481,11 +481,11 @@ func TestErrorThrottleAllowsDifferentErrors(t *testing.T) {
 	})
 
 	src.err = errFake("first")
-	r.pollOnce(context.Background())
+	r.PollOnce(context.Background())
 	src.err = errFake("second")
-	r.pollOnce(context.Background())
+	r.PollOnce(context.Background())
 	src.err = errFake("first") // back to first - within window so suppressed
-	r.pollOnce(context.Background())
+	r.PollOnce(context.Background())
 
 	// last fire was "second", lastErrMsg="second". Now we get "first"
 	// which differs from "second" so it fires.
@@ -509,8 +509,8 @@ func TestErrorThrottleDisabledByDefault(t *testing.T) {
 		OnError: func(err error) { fired++ },
 	})
 
-	r.pollOnce(context.Background())
-	r.pollOnce(context.Background())
+	r.PollOnce(context.Background())
+	r.PollOnce(context.Background())
 
 	if fired != 2 {
 		t.Errorf("default throttle should fire every error, got %d", fired)

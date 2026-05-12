@@ -1,55 +1,54 @@
 # txid-bot-framework
 
-Go framework for building polling bots that fetch from a data source and notify subscribers.
+Advanced Go framework for building scalable polling and realtime bots. Optimized for multi-source scraping and multi-channel notification.
 
 ## Features
 
-- **Source interface**: plug in any data fetcher (RSS, API, web scraping)
-- **SQLite state**: subscribers, deduplication (IsSeen/IsSent), retention cleanup
-- **Telegram notifier**: built-in, with inline keyboards + image support
-- **Command dispatcher**: `/subscribe`, `/unsubscribe`, `/start` out of the box, custom commands via `Handle()`
-- **Graceful shutdown**: context-aware runner
+- **Multi-Source Support**: Merge multiple data fetchers (RSS, API, Scrapers) into a single unified stream via `core.MultiSource`.
+- **Multi-Channel Delivery**: Broadcast messages to Telegram, Discord, Naver Band, and Discussions API via `core.MultiNotifier`.
+- **AI Data Archiving**: Automatically backups raw items to daily JSONL files for LLM training and RAG ingestion.
+- **SQLite Persistence**: Robust deduplication (`IsSeen`, `IsSent`) and subscriber management using SQLite WAL mode.
+- **One-Shot & Polling**: Support for both 24/7 loops and cron-style executions (GitHub Actions ready).
+- **Stability**: Built-in panic recovery for notifier goroutines and graceful shutdown support.
+- **Command Dispatcher**: Full-featured Telegram handler with `/subscribe`, `/unsubscribe`, and custom hooks.
 
 ## Package layout
 
 ```
 pkg/
-  core/     Item, Message, Source, Formatter, Notifier interfaces
+  core/     Item, Message, MultiSource, MultiNotifier, Source, Formatter, Notifier
   store/    SQLite-backed state (subscribers + dedup)
-  notify/   Telegram notifier implementation
-  bot/      Runner + TelegramDispatcher
-examples/
-  minimal/  Complete RSS feed bot (~100 lines)
+  notify/   Telegram, Discord, Naver Band, Discussions API implementations
+  bot/      Runner (Polling/One-shot), TelegramDispatcher
+  archive/  Daily raw data JSONL archiver
 ```
 
-## Quick start
+## Quick start (Multi-Channel Example)
 
 ```go
-source := NewMySource()     // implements core.Source
-fmt := &MyFormatter{}       // implements core.Formatter
-tg, _ := notify.NewTelegram(token)
+src := core.NewMultiSource(src1, src2)
+ntf := core.NewMultiNotifier(telegramNtf, discordNtf)
 st, _ := store.Open("./bot.db", "my-bot")
 
 runner := bot.New(bot.Config{
-    Name:         "my-bot",
-    Source:       source,
-    Formatter:    fmt,
-    Notifier:     tg,
-    Store:        st,
-    PollInterval: 10 * time.Minute,
+    Name:      "my-bot",
+    Source:    src,
+    Formatter: &MyFormatter{},
+    Notifier:  ntf,
+    Store:     st,
 })
+
+// One-shot execution (e.g. for Cron)
+runner.PollOnce(ctx)
+
+// Or continuous polling
 runner.Run(ctx)
 ```
 
-See `examples/minimal/main.go` for a complete RSS feed bot.
-
 ## State model
 
-A single SQLite file can host multiple bots. Each bot uses a `botKey`
-namespace to isolate its subscribers and dedup state:
+The framework uses a shared SQLite schema with `bot_key` namespacing:
 
-- `bot_subscribers(bot_key, chat_id, active)` - subscription state
-- `bot_seen(bot_key, source, item_id)` - dedup (don't refetch)
-- `bot_sent(bot_key, chat_id, item_id)` - per-recipient delivery
-
-Bot-specific tables can be added via `store.DB()` for custom features.
+- `bot_subscribers`: Per-bot subscription state.
+- `bot_seen`: Global deduplication (prevents redundant processing).
+- `bot_sent`: Per-recipient delivery tracking (prevents duplicate alerts).

@@ -22,6 +22,10 @@ type Item struct {
 type Message struct {
 	Text      string
 	ParseMode string // "Markdown", "HTML", or ""
+	// PlainText is an optional plain-text variant used by channels that
+	// cannot parse Text's ParseMode (e.g., Naver Band, raw webhooks).
+	// When empty, channels fall back to Text.
+	PlainText string
 	ImageURL  string
 	Buttons   [][]Button
 }
