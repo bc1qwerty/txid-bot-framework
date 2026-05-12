@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bc1qwerty/txid-bot-framework/pkg/core"
@@ -49,6 +50,41 @@ func (a *Archiver) Archive(botName string, items []core.Item) error {
 	}
 
 	return nil
+}
+
+// Rotate removes JSONL backups older than retainDays. Returns the count
+// of removed files. retainDays <= 0 or empty BaseDir is a no-op.
+//
+// This is intentionally conservative: it only touches .jsonl files
+// under BaseDir and never traverses symlinks. Empty subdirectories are
+// left in place so future writes do not race a mkdir.
+func (a *Archiver) Rotate(retainDays int) (int, error) {
+	if retainDays <= 0 || a.BaseDir == "" {
+		return 0, nil
+	}
+	cutoff := time.Now().AddDate(0, 0, -retainDays)
+	removed := 0
+	err := filepath.Walk(a.BaseDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if info == nil || info.IsDir() {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".jsonl") {
+			return nil
+		}
+		if info.ModTime().Before(cutoff) {
+			if err := os.Remove(path); err == nil {
+				removed++
+			}
+		}
+		return nil
+	})
+	return removed, err
 }
 
 // RecordHeartbeat updates a small file indicating the bot is alive.

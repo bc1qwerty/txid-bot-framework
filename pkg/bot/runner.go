@@ -29,6 +29,11 @@ type Config struct {
 	// Prefer leaving ArchiveDir empty; this flag exists for back-compat.
 	DisableArchiving bool
 
+	// ArchiveRetainDays caps how long raw JSONL backups stick around.
+	// runCleanup deletes older files daily. 0 disables rotation (files
+	// accumulate forever — fine for development, risky for production).
+	ArchiveRetainDays int
+
 	// MaxItemsPerPoll caps how many newly-discovered items are dispatched
 	// per poll. Items beyond the cap are marked seen — they will NOT be
 	// retried later. Use this to prevent flood after extended downtime
@@ -211,6 +216,13 @@ func (r *Runner) PollOnce(ctx context.Context) {
 		if err := r.archiver.Archive(r.cfg.Name, items); err != nil {
 			r.log.Printf("archiving failed: %v", err)
 		}
+		// Best-effort rotation for one-shot bots that never enter
+		// runCleanup. Cheap (stat-only) when no files are stale.
+		if r.cfg.ArchiveRetainDays > 0 {
+			if removed, err := r.archiver.Rotate(r.cfg.ArchiveRetainDays); err == nil && removed > 0 {
+				r.log.Printf("archive rotate: removed %d old jsonl files", removed)
+			}
+		}
 	}
 
 	if len(items) == 0 {
@@ -368,6 +380,13 @@ func (r *Runner) runCleanup(ctx context.Context) {
 				r.log.Printf("cleanup error: %v", err)
 			} else {
 				r.log.Printf("cleanup done (retain=%s)", retain)
+			}
+			if r.archiver != nil && r.cfg.ArchiveRetainDays > 0 {
+				if removed, err := r.archiver.Rotate(r.cfg.ArchiveRetainDays); err != nil {
+					r.log.Printf("archive rotate error: %v", err)
+				} else if removed > 0 {
+					r.log.Printf("archive rotate: removed %d old jsonl files", removed)
+				}
 			}
 		}
 	}
