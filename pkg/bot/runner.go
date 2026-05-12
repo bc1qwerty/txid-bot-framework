@@ -162,6 +162,14 @@ func (r *Runner) Run(ctx context.Context) error {
 	// Initial poll
 	r.PollOnce(ctx)
 
+	// Bootstrap mode is one-shot even inside Run(): the first poll has
+	// marked every backlog item seen, and we want the operator to
+	// restart the service without BOOTSTRAP_DEDUP for normal dispatch.
+	if r.cfg.BootstrapMode {
+		r.log.Println("bootstrap complete — exit. Restart without BOOTSTRAP_DEDUP for normal dispatch.")
+		return nil
+	}
+
 	// Start cleanup goroutine
 	go r.runCleanup(ctx)
 
