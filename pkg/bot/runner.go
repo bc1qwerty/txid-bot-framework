@@ -82,6 +82,16 @@ type Config struct {
 	// Zero (default) fires every error - existing behavior.
 	ErrorThrottle time.Duration
 
+	// OnPollComplete is called at the end of every PollOnce, regardless
+	// of whether any new items were dispatched. The intended use is to
+	// nudge a liveness sink (e.g., notifyhub.LogPush) so dashboards do
+	// not flag low-volume bots as stale during long quiet stretches.
+	//
+	// Receives the total number of fresh items that reached the
+	// dispatch loop (after dedup, before subscription filter). A non-
+	// nil return is logged but not fatal.
+	OnPollComplete func(ctx context.Context, newItemCount int) error
+
 	// OnNewItem is called for each newly-fetched item before dispatch.
 	// Runs after dedup filtering, once per item regardless of subscriber count.
 	// Useful for fan-out to external channels (notification hub, logs).
@@ -254,6 +264,11 @@ func (r *Runner) PollOnce(ctx context.Context) {
 
 	if len(newItems) == 0 {
 		r.log.Printf("no new items")
+		if r.cfg.OnPollComplete != nil {
+			if err := r.cfg.OnPollComplete(ctx, 0); err != nil {
+				r.log.Printf("OnPollComplete hook error: %v", err)
+			}
+		}
 		return
 	}
 
@@ -346,6 +361,12 @@ func (r *Runner) PollOnce(ctx context.Context) {
 
 		if err := r.cfg.Store.MarkSeen(source, item.ID); err != nil {
 			r.log.Printf("mark seen error: %v", err)
+		}
+	}
+
+	if r.cfg.OnPollComplete != nil {
+		if err := r.cfg.OnPollComplete(ctx, len(newItems)); err != nil {
+			r.log.Printf("OnPollComplete hook error: %v", err)
 		}
 	}
 }
