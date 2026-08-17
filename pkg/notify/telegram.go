@@ -4,6 +4,7 @@ package notify
 import (
 	"context"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
@@ -11,6 +12,12 @@ import (
 
 	"github.com/bc1qwerty/txid-bot-framework/pkg/core"
 )
+
+// telegramCaptionLimit is the Bot API's max caption length for a photo,
+// in UTF-16 code units. Counting runes is a safe under-approximation
+// (a rune is 1 or 2 units) except for emoji-heavy text, so we stay
+// comfortably inside the real limit.
+const telegramCaptionLimit = 1000
 
 // Telegram delivers messages via the Telegram Bot API.
 type Telegram struct {
@@ -75,22 +82,49 @@ func (t *Telegram) Send(ctx context.Context, recipient string, msg core.Message)
 		}
 	}
 
-	if msg.ImageURL != "" {
+	// ImageData (an upload) wins over ImageURL (a fetch-by-Telegram),
+	// because a source that inlines its image has no URL to offer.
+	var file tgbotapi.RequestFileData
+	switch {
+	case len(msg.ImageData) > 0:
+		name := msg.ImageName
+		if name == "" {
+			name = "image.jpg"
+		}
+		file = tgbotapi.FileBytes{Name: name, Bytes: msg.ImageData}
+	case msg.ImageURL != "":
+		file = tgbotapi.FileURL(msg.ImageURL)
+	}
+
+	if file != nil {
 		var photo tgbotapi.PhotoConfig
 		if channelUsername != "" {
-			photo = tgbotapi.NewPhotoToChannel(channelUsername, tgbotapi.FileURL(msg.ImageURL))
+			photo = tgbotapi.NewPhotoToChannel(channelUsername, file)
 		} else {
-			photo = tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(msg.ImageURL))
+			photo = tgbotapi.NewPhoto(chatID, file)
 		}
-		photo.Caption = msg.Text
-		photo.ParseMode = msg.ParseMode
-		if hasKeyboard {
-			photo.ReplyMarkup = keyboard
+		// Telegram caps photo captions at 1024 chars (vs 4096 for a plain
+		// message) and rejects the whole send when it overflows. Drop the
+		// caption rather than lose the photo; the text message below is
+		// suppressed only on success, so an over-long body still needs its
+		// own message.
+		caption, captionFits := msg.Text, len([]rune(msg.Text)) <= telegramCaptionLimit
+		if captionFits {
+			photo.Caption = caption
+			photo.ParseMode = msg.ParseMode
+			if hasKeyboard {
+				photo.ReplyMarkup = keyboard
+			}
 		}
 		if _, err := t.api.Send(photo); err == nil {
-			return nil
+			if captionFits {
+				return nil
+			}
+		} else {
+			// Fall through to text, but say why: a silent downgrade would
+			// hide a broken image pipeline behind still-arriving alerts.
+			log.Printf("[telegram] photo send failed for %s, falling back to text: %v", recipient, err)
 		}
-		// Fall through to text if image send failed
 	}
 
 	var text tgbotapi.MessageConfig

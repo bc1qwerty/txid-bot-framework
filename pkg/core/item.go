@@ -14,6 +14,16 @@ type Item struct {
 	URL       string
 	Category  string
 	ImageURL  string
+	// ImageData carries an image the Source already holds in memory, for
+	// sources that inline it (e.g. a base64 data: URI in a JSON payload)
+	// and therefore have no URL Telegram could fetch on its own.
+	// json:"-" keeps it out of the archiver's JSONL: a megabyte of
+	// base64 per item would balloon the daily backup.
+	ImageData []byte `json:"-"`
+	// ImageName is the filename sent alongside ImageData. Telegram uses
+	// its extension to pick a MIME type, so it must match the actual
+	// bytes (e.g. "alert.png"). Empty falls back to "image.jpg".
+	ImageName string
 	Timestamp time.Time
 	Meta      map[string]string
 }
@@ -27,6 +37,10 @@ type Message struct {
 	// When empty, channels fall back to Text.
 	PlainText string
 	ImageURL  string
+	// ImageData is an in-memory image to upload. It takes precedence over
+	// ImageURL. Channels that cannot post binary (Naver Band) ignore it.
+	ImageData []byte
+	ImageName string
 	Buttons   [][]Button
 }
 
