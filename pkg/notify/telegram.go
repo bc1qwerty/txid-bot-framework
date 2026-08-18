@@ -82,10 +82,53 @@ func (t *Telegram) Send(ctx context.Context, recipient string, msg core.Message)
 		}
 	}
 
+	// A document is the material itself (a KOSHA OPS sheet is a PDF), so it
+	// outranks any preview image. Sent as a document rather than a photo on
+	// purpose: Telegram re-encodes photos, which shreds small type, and a
+	// photo cannot be saved back out as the original PDF.
+	docSent := false
+	if len(msg.FileData) > 0 {
+		name := msg.FileName
+		if name == "" {
+			name = "file"
+		}
+		blob := tgbotapi.FileBytes{Name: name, Bytes: msg.FileData}
+		// v5 has NewPhotoToChannel but no document equivalent; the channel
+		// username goes on BaseChat, which the API prefers over ChatID.
+		doc := tgbotapi.NewDocument(chatID, blob)
+		doc.ChannelUsername = channelUsername
+		// Same caption rule as photos: Telegram rejects the whole send when
+		// the caption overflows, so drop the caption instead of the file and
+		// let the text message below carry the body.
+		captionFits := len([]rune(msg.Text)) <= telegramCaptionLimit
+		if captionFits {
+			doc.Caption = msg.Text
+			doc.ParseMode = msg.ParseMode
+			if hasKeyboard {
+				doc.ReplyMarkup = keyboard
+			}
+		}
+		if _, err := t.api.Send(doc); err == nil {
+			docSent = true
+			if captionFits {
+				return nil
+			}
+			// Caption did not fit: fall through for the text body only. The
+			// image below must stay skipped or the post arrives twice.
+		} else {
+			// Say why rather than silently degrading: alerts would keep
+			// arriving and hide a broken upload path.
+			log.Printf("[telegram] document send failed for %s (%s, %d bytes), falling back: %v",
+				recipient, name, len(msg.FileData), err)
+		}
+	}
+
 	// ImageData (an upload) wins over ImageURL (a fetch-by-Telegram),
 	// because a source that inlines its image has no URL to offer.
 	var file tgbotapi.RequestFileData
 	switch {
+	case docSent:
+		// already delivered as a document; only the text body is left
 	case len(msg.ImageData) > 0:
 		name := msg.ImageName
 		if name == "" {

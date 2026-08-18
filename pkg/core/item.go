@@ -8,12 +8,12 @@ import (
 
 // Item is a generic unit fetched from a data source.
 type Item struct {
-	ID        string // unique identifier for deduplication
-	Title     string
-	Content   string
-	URL       string
-	Category  string
-	ImageURL  string
+	ID       string // unique identifier for deduplication
+	Title    string
+	Content  string
+	URL      string
+	Category string
+	ImageURL string
 	// ImageData carries an image the Source already holds in memory, for
 	// sources that inline it (e.g. a base64 data: URI in a JSON payload)
 	// and therefore have no URL Telegram could fetch on its own.
@@ -24,6 +24,17 @@ type Item struct {
 	// its extension to pick a MIME type, so it must match the actual
 	// bytes (e.g. "alert.png"). Empty falls back to "image.jpg".
 	ImageName string
+	// FileData carries a document (PDF, archive, video) the Source already
+	// holds in memory. Use this rather than ImageData when the attachment
+	// is the material itself and must stay uncompressed and downloadable —
+	// Telegram re-encodes photos, which ruins a text-heavy PDF page.
+	// json:"-" for the same reason as ImageData: it would bloat the
+	// archiver's JSONL.
+	FileData []byte `json:"-"`
+	// FileName is the filename sent alongside FileData. It is what the
+	// reader sees in the channel, so prefer the source's original name.
+	// Empty falls back to "file".
+	FileName  string
 	Timestamp time.Time
 	Meta      map[string]string
 }
@@ -41,7 +52,13 @@ type Message struct {
 	// ImageURL. Channels that cannot post binary (Naver Band) ignore it.
 	ImageData []byte
 	ImageName string
-	Buttons   [][]Button
+	// FileData is an in-memory document to upload. It takes precedence
+	// over both ImageData and ImageURL: when a Source supplies the actual
+	// material, a preview image is the lesser thing to show. Channels that
+	// cannot post binary ignore it and fall back to Text.
+	FileData []byte
+	FileName string
+	Buttons  [][]Button
 }
 
 // Button is an inline keyboard button.

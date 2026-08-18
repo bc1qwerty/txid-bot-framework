@@ -189,3 +189,96 @@ func TestSendOverlongCaptionAlsoSendsText(t *testing.T) {
 		t.Errorf("full text should follow as its own message")
 	}
 }
+
+// TestSendFileDataUploadsDocument locks in the 자료실 path: a KOSHA OPS
+// sheet is a PDF, and the reader needs the file itself, not a preview.
+// It must go out as sendDocument (photos get re-encoded, which shreds
+// small type) with the original filename preserved.
+func TestSendFileDataUploadsDocument(t *testing.T) {
+	tg, calls := newStubTelegram(t)
+
+	pdf := []byte("%PDF-1.4 stub")
+	err := tg.Send(context.Background(), "@safety_alarm_korea", core.Message{
+		Text:      "본문",
+		ParseMode: "HTML",
+		FileData:  pdf,
+		FileName:  "[2026-교육총괄실-615]키메시지.pdf",
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %+v", len(*calls), *calls)
+	}
+	c := (*calls)[0]
+	if c.method != "sendDocument" {
+		t.Errorf("method = %q, want sendDocument", c.method)
+	}
+	// The channel form of a document has no NewDocumentToChannel helper in
+	// v5, so the username is set on BaseChat by hand — assert it survives.
+	if got := c.fields["chat_id"]; got != "@safety_alarm_korea" {
+		t.Errorf("chat_id = %q, want @safety_alarm_korea", got)
+	}
+	if c.fileName != "[2026-교육총괄실-615]키메시지.pdf" {
+		t.Errorf("filename = %q, original name not preserved", c.fileName)
+	}
+	if string(c.fileBytes) != string(pdf) {
+		t.Errorf("uploaded bytes differ from source")
+	}
+	if c.fields["caption"] != "본문" {
+		t.Errorf("caption = %q, want 본문", c.fields["caption"])
+	}
+}
+
+// TestSendFileDataBeatsImageData: when a source supplies both, the document
+// is the material and the image is only a thumbnail. Sending both would
+// post every archive item twice.
+func TestSendFileDataBeatsImageData(t *testing.T) {
+	tg, calls := newStubTelegram(t)
+
+	err := tg.Send(context.Background(), "@ch", core.Message{
+		Text:      "본문",
+		FileData:  []byte("%PDF-1.4 stub"),
+		FileName:  "doc.pdf",
+		ImageData: []byte("\x89PNG\r\n\x1a\n thumb"),
+		ImageName: "thumb.png",
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("expected exactly 1 call (document only), got %d", len(*calls))
+	}
+	if (*calls)[0].method != "sendDocument" {
+		t.Errorf("method = %q, want sendDocument", (*calls)[0].method)
+	}
+}
+
+// TestSendFileDataOverlongCaptionAlsoSendsText mirrors the photo rule:
+// Telegram rejects the whole send when a caption overflows, so the file
+// goes out bare and the body follows as its own message. The thumbnail
+// must still not be sent — that was a real bug in the first draft.
+func TestSendFileDataOverlongCaptionAlsoSendsText(t *testing.T) {
+	tg, calls := newStubTelegram(t)
+
+	long := strings.Repeat("가", telegramCaptionLimit+1)
+	err := tg.Send(context.Background(), "@ch", core.Message{
+		Text:      long,
+		FileData:  []byte("%PDF-1.4 stub"),
+		FileName:  "doc.pdf",
+		ImageData: []byte("\x89PNG\r\n\x1a\n thumb"),
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if len(*calls) != 2 {
+		t.Fatalf("expected document + text, got %d calls", len(*calls))
+	}
+	if (*calls)[0].method != "sendDocument" || (*calls)[1].method != "sendMessage" {
+		t.Errorf("calls = %q/%q, want sendDocument/sendMessage",
+			(*calls)[0].method, (*calls)[1].method)
+	}
+	if (*calls)[0].fields["caption"] != "" {
+		t.Errorf("overlong caption should have been dropped, got %q", (*calls)[0].fields["caption"])
+	}
+}
