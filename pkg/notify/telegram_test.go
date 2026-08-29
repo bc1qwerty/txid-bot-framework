@@ -2,6 +2,7 @@ package notify
 
 import (
 	"context"
+	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -280,5 +281,39 @@ func TestSendFileDataOverlongCaptionAlsoSendsText(t *testing.T) {
 	}
 	if (*calls)[0].fields["caption"] != "" {
 		t.Errorf("overlong caption should have been dropped, got %q", (*calls)[0].fields["caption"])
+	}
+}
+
+// 토큰은 URL 안에 들어간다. tgbotapi 는 네트워크 오류를 그대로 돌려주고
+// net/http 의 *url.Error 는 그 URL 을 담으므로, 발송 실패를 로그에 찍으면
+// 토큰이 평문으로 남는다. GHA 는 secrets 를 가려 주지만 mac launchd 로 도는
+// 봇의 로그는 아무도 안 가려 준다.
+func TestScrubTokenRemovesTokenKeepsReason(t *testing.T) {
+	const token = "8786781614:AAFUBRVr4PNCY49Md2OUvOVNSmfBTLdi8nk"
+	err := errors.New(`Post "https://api.telegram.org/bot` + token +
+		`/sendMessage": dial tcp: i/o timeout`)
+
+	got := scrubToken(token, err)
+	if got == nil {
+		t.Fatal("오류가 사라졌다 — 가리기만 해야 한다")
+	}
+	if strings.Contains(got.Error(), token) {
+		t.Fatalf("토큰이 그대로 남았다: %s", got.Error())
+	}
+	if !strings.Contains(got.Error(), "i/o timeout") {
+		t.Errorf("실패 사유까지 지웠다: %s", got.Error())
+	}
+}
+
+func TestScrubTokenLeavesOtherErrorsAlone(t *testing.T) {
+	err := errors.New("chat not found")
+	if got := scrubToken("tok", err); got != err {
+		t.Errorf("토큰이 없는 오류를 굳이 새로 만들었다: %v", got)
+	}
+	if scrubToken("tok", nil) != nil {
+		t.Error("nil 을 오류로 만들었다")
+	}
+	if got := scrubToken("", err); got != err {
+		t.Error("토큰이 비면 그대로 돌려줘야 한다")
 	}
 }

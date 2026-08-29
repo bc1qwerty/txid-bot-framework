@@ -3,6 +3,7 @@ package notify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -24,11 +25,38 @@ type Telegram struct {
 	api *tgbotapi.BotAPI
 }
 
+// 토큰은 URL 안에 들어간다(`/bot<토큰>/<method>`). tgbotapi 는 네트워크 오류를
+// 그대로 돌려주고, net/http 의 *url.Error 는 그 URL 을 담는다. 그래서 발송 실패를
+// 로그에 찍는 순간 토큰이 평문으로 남는다.
+//
+// GitHub Actions 는 secrets 를 자동으로 가려 주지만, 이 패키지를 쓰는 봇 중에는
+// mac launchd 로 도는 것도 있고 그쪽 로그는 아무도 안 가려 준다. 같은 실수를
+// txiduk-bot 이 실제로 32줄 남긴 뒤에 여기도 막았다.
+//
+// 오류를 삼키지는 않는다 — 토큰만 지우고 사유는 그대로 남긴다.
+func scrubToken(token string, err error) error {
+	if err == nil || token == "" {
+		return err
+	}
+	msg := strings.ReplaceAll(err.Error(), token, "***")
+	if msg == err.Error() {
+		return err
+	}
+	return errors.New(msg)
+}
+
+func (t *Telegram) scrub(err error) error {
+	if t == nil || t.api == nil {
+		return err
+	}
+	return scrubToken(t.api.Token, err)
+}
+
 // NewTelegram creates a new Telegram notifier.
 func NewTelegram(token string) (*Telegram, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
-		return nil, fmt.Errorf("telegram bot api: %w", err)
+		return nil, fmt.Errorf("telegram bot api: %w", scrubToken(token, err))
 	}
 	return &Telegram{api: api}, nil
 }
@@ -119,7 +147,7 @@ func (t *Telegram) Send(ctx context.Context, recipient string, msg core.Message)
 			// Say why rather than silently degrading: alerts would keep
 			// arriving and hide a broken upload path.
 			log.Printf("[telegram] document send failed for %s (%s, %d bytes), falling back: %v",
-				recipient, name, len(msg.FileData), err)
+				recipient, name, len(msg.FileData), t.scrub(err))
 		}
 	}
 
@@ -166,7 +194,7 @@ func (t *Telegram) Send(ctx context.Context, recipient string, msg core.Message)
 		} else {
 			// Fall through to text, but say why: a silent downgrade would
 			// hide a broken image pipeline behind still-arriving alerts.
-			log.Printf("[telegram] photo send failed for %s, falling back to text: %v", recipient, err)
+			log.Printf("[telegram] photo send failed for %s, falling back to text: %v", recipient, t.scrub(err))
 		}
 	}
 
@@ -182,5 +210,5 @@ func (t *Telegram) Send(ctx context.Context, recipient string, msg core.Message)
 		text.ReplyMarkup = keyboard
 	}
 	_, err := t.api.Send(text)
-	return err
+	return t.scrub(err)
 }
