@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -53,12 +55,56 @@ func (t *Telegram) scrub(err error) error {
 }
 
 // NewTelegram creates a new Telegram notifier.
+//
+// ⚠ NewBotAPI 는 곧바로 getMe 를 친다. 그 한 번이 네트워크 사정으로 실패하면
+// 봇이 통째로 죽는데, 호출부 대부분이 log.Fatalf 라 그 실행은 그대로 끝난다.
+// 2026-08-30 실측: safety_alarm_bot 은 정상 완료 5,258회에 대해 네트워크 오류가
+// 2,202회였다 — **약 30% 실행이 여기서 죽고 있었다.** 30분 뒤 다음 실행이
+// 회복하므로 결과물로는 잘 안 드러나고, launchd 종료코드에만 남는다.
+//
+// 그래서 **일시적 오류만** 짧게 재시도한다. 토큰이 틀린 경우(401 Unauthorized)는
+// 몇 번을 쳐도 같으므로 즉시 포기한다 — 안 그러면 잘못된 토큰으로 기동할 때마다
+// 쓸데없이 3초를 버린다.
 func NewTelegram(token string) (*Telegram, error) {
-	api, err := tgbotapi.NewBotAPI(token)
-	if err != nil {
-		return nil, fmt.Errorf("telegram bot api: %w", scrubToken(token, err))
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+		var api *tgbotapi.BotAPI
+		api, err = tgbotapi.NewBotAPI(token)
+		if err == nil {
+			return &Telegram{api: api}, nil
+		}
+		if !isTransient(err) {
+			break
+		}
 	}
-	return &Telegram{api: api}, nil
+	return nil, fmt.Errorf("telegram bot api: %w", scrubToken(token, err))
+}
+
+// isTransient 는 재시도할 값어치가 있는 오류인지 본다.
+// ⚠ 문자열 판정을 쓰는 이유: tgbotapi 는 HTTP 오류를 자체 타입으로 감싸지 않고
+// net 계열 오류를 그대로 올려보내기도 해서 errors.As 로 일관되게 못 가른다.
+func isTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return true
+	}
+	s := err.Error()
+	for _, m := range []string{
+		"connection reset", "read tcp", "i/o timeout", "EOF",
+		"connection refused", "no such host", "TLS handshake",
+		"Bad Gateway", "Service Unavailable", "Gateway Timeout",
+	} {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // API returns the underlying bot API for custom handlers.
