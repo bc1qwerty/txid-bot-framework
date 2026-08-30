@@ -1,0 +1,35 @@
+name: ci
+
+# 왜 있나 (2026-08-30):
+# 이 리포는 `safety_alarm_bot`·`social-feed-bot` 등이 물고 가는 **공용 프레임워크**인데
+# CI 가 없었다. 여기서 깨지면 봇 여러 개가 한꺼번에 조용히 죽는다 —
+# 실제로 오늘 `NewTelegram` 이 getMe 실패에 재시도가 없어 safety_alarm_bot 이
+# 실행의 약 30%(2,202/5,258)를 죽고 있던 것을 고쳤다. 그 수정을 지키는 그물이 필요하다.
+#
+# ⚠ 게이트는 **go vet + go test** 만 둔다. 린터를 더 얹지 않는 이유는
+#   지금 6개 Go 리포가 전부 vet 통과라 추가 규칙이 잡을 게 없어서다.
+#   잡을 게 생기면 그때 늘린다.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test ./...
+      - name: gofmt 확인
+        run: |
+          # ⚠ gofmt 는 조용히 다른 결과를 내지 않는다 — 포맷이 어긋나면 diff 가 남는다.
+          out=$(gofmt -l . | grep -v '^vendor/' || true)
+          [ -z "$out" ] || { echo "gofmt 미정렬:"; echo "$out"; exit 1; }

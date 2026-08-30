@@ -157,7 +157,9 @@ func main() {
 		Notifier:     LoggingNotifier{},
 		Store:        st,
 		PollInterval: time.Hour,
-		ItemFilter:   func(_ context.Context, sub store.Subscription, item core.Item) bool { return matchesPriceRange(sub, item) },
+		ItemFilter: func(_ context.Context, sub store.Subscription, item core.Item) bool {
+			return matchesPriceRange(sub, item)
+		},
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())

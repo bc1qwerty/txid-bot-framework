@@ -371,7 +371,6 @@ func (r *Runner) PollOnce(ctx context.Context) {
 	}
 }
 
-
 // invokeOnError fires the user-supplied OnError hook with optional
 // throttling. When ErrorThrottle is set, identical consecutive errors
 // inside the window are suppressed (still logged locally above).

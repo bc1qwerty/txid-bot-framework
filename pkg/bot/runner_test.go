@@ -226,7 +226,7 @@ func TestSubscribeRichMetaRoundTrip(t *testing.T) {
 		ID:        "user1:cond42",
 		Recipient: "user1",
 		Meta: map[string]string{
-			"sigungu": "11680",
+			"sigungu":   "11680",
 			"min_price": "500000000",
 		},
 	})
@@ -437,7 +437,7 @@ type fakeErrSource struct {
 	err error
 }
 
-func (f *fakeErrSource) Name() string                                  { return "errsrc" }
+func (f *fakeErrSource) Name() string                                   { return "errsrc" }
 func (f *fakeErrSource) Fetch(ctx context.Context) ([]core.Item, error) { return nil, f.err }
 
 // TestErrorThrottleSuppressesDuplicates verifies that two consecutive

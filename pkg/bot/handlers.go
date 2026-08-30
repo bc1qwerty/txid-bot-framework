@@ -36,13 +36,13 @@ type SubscribeHook func(ctx context.Context, chatID int64)
 // TelegramDispatcher routes Telegram updates to subscribe/unsubscribe
 // and any custom command handlers registered by the bot.
 type TelegramDispatcher struct {
-	tg           *notify.Telegram
-	store        *store.Store
-	handlers     map[string]CommandHandler
-	callbacks    map[string]CallbackHandler
-	textHandler  TextHandler
-	messages     DispatcherMessages
-	onSubscribe  SubscribeHook
+	tg          *notify.Telegram
+	store       *store.Store
+	handlers    map[string]CommandHandler
+	callbacks   map[string]CallbackHandler
+	textHandler TextHandler
+	messages    DispatcherMessages
+	onSubscribe SubscribeHook
 }
 
 // DispatcherMessages are the localizable strings.
