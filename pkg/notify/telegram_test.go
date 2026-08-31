@@ -289,7 +289,7 @@ func TestSendFileDataOverlongCaptionAlsoSendsText(t *testing.T) {
 // 토큰이 평문으로 남는다. GHA 는 secrets 를 가려 주지만 mac launchd 로 도는
 // 봇의 로그는 아무도 안 가려 준다.
 func TestScrubTokenRemovesTokenKeepsReason(t *testing.T) {
-	const token = "8786781614:AAFUBRVr4PNCY49Md2OUvOVNSmfBTLdi8nk"
+	const token = "123456789:AAFakeTestTokenNotARealBotToken00000000"
 	err := errors.New(`Post "https://api.telegram.org/bot` + token +
 		`/sendMessage": dial tcp: i/o timeout`)
 
