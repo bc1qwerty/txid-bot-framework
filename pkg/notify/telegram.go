@@ -99,12 +99,56 @@ func isTransient(err error) bool {
 		"connection reset", "read tcp", "i/o timeout", "EOF",
 		"connection refused", "no such host", "TLS handshake",
 		"Bad Gateway", "Service Unavailable", "Gateway Timeout",
+		// ⚠ 429 는 가장 흔한 일시적 실패인데 빠져 있었다. 이 fleet 은 텔레그램
+		// 한도가 **IP 단위 공유**라(봇당 6/분) 실제로 자주 걸리고, api.txid.uk 가
+		// 같은 한도로 7일간 525건을 잃은 적이 있다(2026-08-21).
+		"Too Many Requests",
 	} {
 		if strings.Contains(s, m) {
 			return true
 		}
 	}
 	return false
+}
+
+// sendRetryMax 는 총 시도 횟수(최초 1 + 재시도 2)다.
+// ⚠ 재시도를 늘리는 건 **호출이 텔레그램 쪽에서 멱등할 때만** 안전하다 —
+// sendMessage·sendPhoto·sendDocument 는 멱등이다(safety_alarm_bot 이 같은 판단으로
+// 이미 이 정책을 쓰고 있다). 새 메서드를 여기 태우기 전에 그것부터 확인할 것.
+const sendRetryMax = 3
+
+// retryWait 는 이 오류를 다시 시도할지, 얼마나 기다릴지 답한다.
+// 429 는 텔레그램이 parameters.retry_after 로 대기 시간을 알려 주므로 그걸 따른다
+// — 임의 백오프로 밀어붙이면 한도를 더 깎아먹는다.
+func retryWait(err error, attempt int) (time.Duration, bool) {
+	var tgErr *tgbotapi.Error
+	if errors.As(err, &tgErr) && tgErr.RetryAfter > 0 {
+		return time.Duration(tgErr.RetryAfter) * time.Second, true
+	}
+	if isTransient(err) {
+		return time.Duration(attempt*2) * time.Second, true
+	}
+	return 0, false
+}
+
+// send 는 일시적 실패를 짧게 재시도한다.
+// ⚠ 그전까지 재시도는 **NewTelegram(기동)에만** 있었고 정작 메시지 발송에는
+// 없었다. 즉 봇은 살아서 뜨는데 알림 한 건이 429·순간 네트워크 오류로 조용히
+// 사라질 수 있었다. 4xx(429 제외)는 우리 페이로드가 틀린 것이므로 즉시 포기한다.
+func (t *Telegram) send(c tgbotapi.Chattable, kind string) error {
+	var err error
+	for attempt := 1; attempt <= sendRetryMax; attempt++ {
+		if _, err = t.api.Send(c); err == nil {
+			return nil
+		}
+		wait, again := retryWait(err, attempt)
+		if !again || attempt == sendRetryMax {
+			break
+		}
+		log.Printf("[telegram] %s 재시도 %d/%d (%v 뒤): %v", kind, attempt+1, sendRetryMax, wait, t.scrub(err))
+		time.Sleep(wait)
+	}
+	return err
 }
 
 // API returns the underlying bot API for custom handlers.
@@ -182,7 +226,7 @@ func (t *Telegram) Send(ctx context.Context, recipient string, msg core.Message)
 				doc.ReplyMarkup = keyboard
 			}
 		}
-		if _, err := t.api.Send(doc); err == nil {
+		if err := t.send(doc, "document"); err == nil {
 			docSent = true
 			if captionFits {
 				return nil
@@ -233,7 +277,7 @@ func (t *Telegram) Send(ctx context.Context, recipient string, msg core.Message)
 				photo.ReplyMarkup = keyboard
 			}
 		}
-		if _, err := t.api.Send(photo); err == nil {
+		if err := t.send(photo, "photo"); err == nil {
 			if captionFits {
 				return nil
 			}
@@ -255,6 +299,5 @@ func (t *Telegram) Send(ctx context.Context, recipient string, msg core.Message)
 	if hasKeyboard {
 		text.ReplyMarkup = keyboard
 	}
-	_, err := t.api.Send(text)
-	return t.scrub(err)
+	return t.scrub(t.send(text, "message"))
 }
