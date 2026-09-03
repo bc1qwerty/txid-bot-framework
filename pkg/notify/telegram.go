@@ -14,7 +14,16 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/bc1qwerty/txid-bot-framework/pkg/core"
+
+	"github.com/bc1qwerty/txid-bot-framework/pkg/logsafe"
 )
+
+// ⚠tgbotapi 는 오류를 찍을 때 요청 URL 을 통째로 담는데, 텔레그램은 **봇 토큰을 URL
+// 경로에 넣는다**. 그대로 두면 journald 에 실토큰이 평문으로 남는다(2026-09-03 에
+// VPS 에서 30일 15건 발견). 로거는 패키지 전역이라 여기서 한 번 갈아 두면 이 프로세스의
+// 모든 tgbotapi 로그에 적용된다. 암묵적 init 을 쓰는 이유는 이것이 **선택 사항이 아니라
+// 무조건 지켜야 하는 불변식**이기 때문이다 — 부르는 것을 잊으면 토큰이 샌다.
+func init() { logsafe.Install() }
 
 // telegramCaptionLimit is the Bot API's max caption length for a photo,
 // in UTF-16 code units. Counting runes is a safe under-approximation
