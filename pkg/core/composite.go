@@ -34,9 +34,13 @@ func NewMultiSource(sources ...Source) *MultiSource {
 	return &MultiSource{Sources: sources}
 }
 
-// Name returns a stable composite name so bot_seen keys do not change
-// when sub-sources are reordered. Sub-source identity is still visible
-// via the per-source error wrapping in Fetch.
+// Name 은 하위 소스를 나열한 합성 이름이다.
+//
+// ⚠ 이 이름을 dedup 키로 쓰면 안 된다. 하위 소스를 켜고 끄면(그리고 순서를 바꿔도)
+//
+//	값이 바뀌어 seen 이력이 통째로 고아가 된다 — 예전 주석은 "정렬돼 있어 안정적"
+//	이라고 적혀 있었지만 실제로는 정렬하지 않는다. Runner 는 이제 Item.Source
+//	(하위 소스 이름)를 dedup 키로 쓰므로 이 이름은 로그·식별용으로만 남는다.
 func (ms *MultiSource) Name() string {
 	if len(ms.Sources) == 0 {
 		return "multi-source"
@@ -63,6 +67,14 @@ func (ms *MultiSource) Fetch(ctx context.Context) ([]Item, error) {
 			}
 			// Still merge whatever items the sub-source returned — some
 			// scrapers yield partial results before reporting an error.
+		}
+		// 하위 소스 이름을 스탬프한다 — Runner 가 이 값을 dedup 키로 쓴다.
+		// 이미 값이 있으면(중첩 MultiSource) 안쪽 것을 존중한다.
+		name := s.Name()
+		for i := range items {
+			if items[i].Source == "" {
+				items[i].Source = name
+			}
 		}
 		allItems = append(allItems, items...)
 	}

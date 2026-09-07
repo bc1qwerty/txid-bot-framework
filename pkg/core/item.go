@@ -8,7 +8,19 @@ import (
 
 // Item is a generic unit fetched from a data source.
 type Item struct {
-	ID       string // unique identifier for deduplication
+	ID string // unique identifier for deduplication
+	// Source 는 이 아이템을 만든 **하위** 소스의 이름이다(MultiSource 가 스탬프한다).
+	//
+	// ⚠ 이게 없으면 MultiSource 를 쓰는 봇의 dedup 이 통째로 깨진다(2026-09-08 수정).
+	//   Runner 는 bot_seen 키로 cfg.Source.Name() 을 쓰는데, MultiSource 의 이름은
+	//   `multi[하위소스 목록]` 이라 **크롤러를 하나 켜거나 끄는 순간 이름이 바뀐다.**
+	//   그러면 남은 소스 전부의 seen 이력이 고아가 되고, 다음 폴에서 백로그가 전부
+	//   신규로 보인 뒤 MaxItemsPerPoll 을 넘는 분량이 발송 없이 seen 처리돼 영구
+	//   유실된다. safety_alarm_bot 의 라이브 DB 에 실제로 네임스페이스가 둘로
+	//   갈라져 있었고(multi[moel] 160행 / multi[7개] 80행), 2026-08-30 한 번의
+	//   실행에서 70행이 새 키로 들어갔는데 그중 발송은 10건뿐이었다.
+	//   비어 있으면 Runner 가 cfg.Source.Name() 으로 폴백한다(단일 소스 봇은 그대로).
+	Source   string `json:"-"`
 	Title    string
 	Content  string
 	URL      string

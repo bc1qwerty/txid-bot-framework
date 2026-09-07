@@ -221,6 +221,15 @@ func (r *Runner) Run(ctx context.Context) error {
 func (r *Runner) PollOnce(ctx context.Context) {
 	archive.RecordHeartbeat(r.cfg.HeartbeatDir, r.cfg.Name)
 	source := r.cfg.Source.Name()
+	// 아이템별 dedup 네임스페이스. MultiSource 는 하위 소스 이름을 스탬프하므로
+	// 크롤러 하나를 껐다 켜도 그 크롤러의 행만 영향받는다. 스탬프가 없으면
+	// (단일 소스 봇) 예전과 같이 소스 이름을 쓴다.
+	itemSource := func(it core.Item) string {
+		if it.Source != "" {
+			return it.Source
+		}
+		return source
+	}
 	r.log.Printf("polling source=%s", source)
 
 	items, err := r.cfg.Source.Fetch(ctx)
@@ -258,7 +267,7 @@ func (r *Runner) PollOnce(ctx context.Context) {
 	// Filter out items we've already seen
 	newItems := make([]core.Item, 0, len(items))
 	for _, item := range items {
-		seen, err := r.cfg.Store.IsSeen(source, item.ID)
+		seen, err := r.cfg.Store.IsSeen(itemSource(item), item.ID)
 		if err != nil {
 			r.log.Printf("seen check error: %v", err)
 			continue
@@ -284,7 +293,7 @@ func (r *Runner) PollOnce(ctx context.Context) {
 	if r.cfg.BootstrapMode {
 		r.log.Printf("BOOTSTRAP: marking %d items seen without dispatch", len(newItems))
 		for _, it := range newItems {
-			if err := r.cfg.Store.MarkSeen(source, it.ID); err != nil {
+			if err := r.cfg.Store.MarkSeen(itemSource(it), it.ID); err != nil {
 				r.log.Printf("bootstrap mark seen error: %v", err)
 			}
 		}
@@ -300,7 +309,7 @@ func (r *Runner) PollOnce(ctx context.Context) {
 		r.log.Printf("backlog cap: dispatching %d, marking %d excess as seen",
 			len(newItems), len(excess))
 		for _, it := range excess {
-			if err := r.cfg.Store.MarkSeen(source, it.ID); err != nil {
+			if err := r.cfg.Store.MarkSeen(itemSource(it), it.ID); err != nil {
 				r.log.Printf("mark seen (cap excess) error: %v", err)
 			}
 		}
@@ -383,7 +392,7 @@ func (r *Runner) PollOnce(ctx context.Context) {
 		//   seen 처리하되 그때는 로그가 아니라 OnError 로 승격시킨다 —
 		//   조용히 버리는 것이 애초에 이 결함의 본질이었다.
 		if sendFailed {
-			attempts, err := r.cfg.Store.RecordSendFailure(source, item.ID, fmt.Sprint(lastSendErr))
+			attempts, err := r.cfg.Store.RecordSendFailure(itemSource(item), item.ID, fmt.Sprint(lastSendErr))
 			if err != nil {
 				r.log.Printf("record send failure error: %v", err)
 			}
@@ -394,11 +403,11 @@ func (r *Runner) PollOnce(ctx context.Context) {
 			r.log.Printf("send gave up item=%s after %d attempts: %v", item.ID, attempts, lastSendErr)
 			r.invokeOnError(fmt.Errorf("발송 %d회 실패로 포기 item=%s: %w", attempts, item.ID, lastSendErr))
 		}
-		if err := r.cfg.Store.ClearSendFailure(source, item.ID); err != nil {
+		if err := r.cfg.Store.ClearSendFailure(itemSource(item), item.ID); err != nil {
 			r.log.Printf("clear send failure error: %v", err)
 		}
 
-		if err := r.cfg.Store.MarkSeen(source, item.ID); err != nil {
+		if err := r.cfg.Store.MarkSeen(itemSource(item), item.ID); err != nil {
 			r.log.Printf("mark seen error: %v", err)
 		}
 	}
