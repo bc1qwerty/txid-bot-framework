@@ -88,6 +88,22 @@ func (s *Store) migrate() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_bot_seen_at ON bot_seen(seen_at);
 
+	-- 발송 실패 카운터.
+	-- ⚠ 예전에는 Notifier.Send 가 실패해도 아이템을 무조건 MarkSeen 해서, 다음 폴의
+	--   IsSeen 게이트가 그 아이템을 걸러 **재시도 기회가 영영 없었다**. 텔레그램이
+	--   429 를 잠깐 내기만 해도 그 알림은 영구 유실되고 흔적은 로그 한 줄뿐이었다.
+	--   이제는 실패하면 seen 처리를 미뤄 다음 폴에서 다시 시도하되, 무한 재시도를
+	--   막기 위해 시도 횟수를 여기 센다. 상한을 넘기면 포기하고 seen 처리한다.
+	CREATE TABLE IF NOT EXISTS bot_send_failure (
+		bot_key TEXT NOT NULL,
+		source TEXT NOT NULL,
+		item_id TEXT NOT NULL,
+		attempts INTEGER NOT NULL DEFAULT 0,
+		last_error TEXT,
+		updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+		PRIMARY KEY (bot_key, source, item_id)
+	);
+
 	CREATE TABLE IF NOT EXISTS bot_sent (
 		bot_key TEXT NOT NULL,
 		chat_id TEXT NOT NULL,
@@ -255,6 +271,39 @@ func (s *Store) IsSeen(source, itemID string) (bool, error) {
 }
 
 // MarkSeen records that an item was fetched.
+// RecordSendFailure 는 (source, itemID) 의 발송 실패 횟수를 1 올리고 누적값을 준다.
+// 반환값이 상한에 도달하면 호출자는 재시도를 포기하고 seen 처리해야 한다 —
+// 그러지 않으면 chat not found 같은 영구 실패가 매 폴마다 영원히 재시도된다.
+func (s *Store) RecordSendFailure(source, itemID, errMsg string) (int, error) {
+	if len(errMsg) > 500 {
+		errMsg = errMsg[:500]
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO bot_send_failure (bot_key, source, item_id, attempts, last_error, updated_at)
+		VALUES (?, ?, ?, 1, ?, unixepoch())
+		ON CONFLICT(bot_key, source, item_id) DO UPDATE SET
+			attempts = attempts + 1,
+			last_error = excluded.last_error,
+			updated_at = unixepoch()`,
+		s.botKey, source, itemID, errMsg)
+	if err != nil {
+		return 0, err
+	}
+	var attempts int
+	err = s.db.QueryRow(
+		`SELECT attempts FROM bot_send_failure WHERE bot_key = ? AND source = ? AND item_id = ?`,
+		s.botKey, source, itemID).Scan(&attempts)
+	return attempts, err
+}
+
+// ClearSendFailure 는 아이템이 결국 성공(또는 포기)했을 때 카운터를 지운다.
+func (s *Store) ClearSendFailure(source, itemID string) error {
+	_, err := s.db.Exec(
+		`DELETE FROM bot_send_failure WHERE bot_key = ? AND source = ? AND item_id = ?`,
+		s.botKey, source, itemID)
+	return err
+}
+
 func (s *Store) MarkSeen(source, itemID string) error {
 	_, err := s.db.Exec(
 		`INSERT OR IGNORE INTO bot_seen (bot_key, source, item_id) VALUES (?, ?, ?)`,

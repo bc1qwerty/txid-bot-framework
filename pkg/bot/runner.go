@@ -4,6 +4,7 @@ package bot
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -13,6 +14,11 @@ import (
 )
 
 // Config carries everything needed to run a bot.
+// 한 아이템의 발송을 몇 번까지 다시 시도할지. 폴 주기가 봇마다 5~30분이라
+// 5회면 대략 25분~2시간 동안 재시도한 뒤 포기한다 — 일시적 429·네트워크 장애를
+// 넘기기에 충분하고, 영구 실패가 영원히 재시도되지도 않는다.
+const maxSendAttempts = 5
+
 type Config struct {
 	// Name identifies this bot for logs and state namespacing.
 	Name string
@@ -328,6 +334,14 @@ func (r *Runner) PollOnce(ctx context.Context) {
 		}
 
 		var matched bool
+		// ⚠ 발송 실패를 기억한다(2026-09-08 추가). 예전에는 Send 가 실패해도 아래
+		//   MarkSeen 이 무조건 실행돼, 다음 폴의 IsSeen 게이트가 그 아이템을 걸러
+		//   **재시도 기회가 영영 없었다**. 텔레그램이 429 를 잠깐 내기만 해도 그
+		//   알림은 영구 유실되고 흔적은 로그 한 줄뿐이었다(격리 재현: 소스가 같은
+		//   아이템을 계속 줘도 재발송 시도 0회). 이 프레임워크를 쓰는 모든 봇에
+		//   공통이었다.
+		var sendFailed bool
+		var lastSendErr error
 		for _, sub := range subs {
 			sent, err := r.cfg.Store.IsSent(sub.ID, item.ID)
 			if err != nil || sent {
@@ -345,6 +359,8 @@ func (r *Runner) PollOnce(ctx context.Context) {
 			}
 			if err := r.cfg.Notifier.Send(ctx, sub.Recipient, msg); err != nil {
 				r.log.Printf("send error sub=%s recipient=%s: %v", sub.ID, sub.Recipient, err)
+				sendFailed = true
+				lastSendErr = err
 				continue
 			}
 			matched = true
@@ -357,6 +373,29 @@ func (r *Runner) PollOnce(ctx context.Context) {
 			if err := r.cfg.OnItemMatched(ctx, item); err != nil {
 				r.log.Printf("OnItemMatched hook error (item=%s): %v", item.ID, err)
 			}
+		}
+
+		// 실패한 구독자가 있으면 seen 처리를 미뤄 다음 폴에서 다시 시도한다.
+		// 재시도는 이미 안전하다 — 위 IsSent 게이트가 성공한 구독자에게 중복
+		// 발송되는 것을 막으므로 실패한 (아이템, 구독자) 쌍만 다시 간다.
+		// ⚠ 다만 무한 재시도는 안 된다. chat not found·bot blocked 같은 영구 실패는
+		//   영원히 성공하지 않으므로, 시도 횟수를 세어 상한을 넘기면 포기하고
+		//   seen 처리하되 그때는 로그가 아니라 OnError 로 승격시킨다 —
+		//   조용히 버리는 것이 애초에 이 결함의 본질이었다.
+		if sendFailed {
+			attempts, err := r.cfg.Store.RecordSendFailure(source, item.ID, fmt.Sprint(lastSendErr))
+			if err != nil {
+				r.log.Printf("record send failure error: %v", err)
+			}
+			if attempts < maxSendAttempts {
+				r.log.Printf("send retry pending item=%s attempts=%d/%d", item.ID, attempts, maxSendAttempts)
+				continue // seen 처리하지 않는다 → 다음 폴에서 재시도
+			}
+			r.log.Printf("send gave up item=%s after %d attempts: %v", item.ID, attempts, lastSendErr)
+			r.invokeOnError(fmt.Errorf("발송 %d회 실패로 포기 item=%s: %w", attempts, item.ID, lastSendErr))
+		}
+		if err := r.cfg.Store.ClearSendFailure(source, item.ID); err != nil {
+			r.log.Printf("clear send failure error: %v", err)
 		}
 
 		if err := r.cfg.Store.MarkSeen(source, item.ID); err != nil {
