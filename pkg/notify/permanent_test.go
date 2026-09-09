@@ -75,3 +75,18 @@ func contains(s, sub string) bool {
 		return false
 	})()
 }
+
+// 내보낸 판정이 내부 판정과 같은 답을 주는지 — 두 벌로 갈라지면 한쪽만 고쳐진다.
+func TestExportedPredicateMatchesInternal(t *testing.T) {
+	for _, e := range []error{
+		&tgbotapi.Error{Code: 403, Message: "Forbidden: bot was blocked by the user"},
+		&tgbotapi.Error{Code: 400, Message: "Bad Request: chat not found"},
+		&tgbotapi.Error{Code: 429, Message: "Too Many Requests: retry after 5"},
+		errors.New("telegram: Bad Gateway"),
+		nil,
+	} {
+		if IsPermanentRecipientError(e) != isPermanentRecipient(e) {
+			t.Fatalf("내보낸 판정이 내부와 다르다: %v", e)
+		}
+	}
+}

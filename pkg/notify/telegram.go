@@ -176,6 +176,15 @@ var permanentRecipientMarkers = []string{
 	"not enough rights to send",
 }
 
+// IsPermanentRecipientError 는 **텔레그램이 돌려준 날것의 오류**가 영구 수신 실패인지
+// 답한다. Runner 를 쓰지 않고 tgbotapi 를 직접 호출하는 봇(realestate-alert-bot 의
+// 레거시 poller 등)이 같은 판정을 재사용하도록 열어 둔 것이다 — 판정 기준이 두 벌로
+// 갈라지면 한쪽만 고쳐지고 다른 쪽은 조용히 낡는다.
+//
+// ⚠core.IsPermanentRecipient 와 혼동하지 말 것. 그쪽은 오류 사슬에 sentinel 이
+// 붙어 있는지 보고(Runner 경로), 이쪽은 sentinel 이 아직 없는 원본 오류를 본다.
+func IsPermanentRecipientError(err error) bool { return isPermanentRecipient(err) }
+
 // isPermanentRecipient 는 403 계열(+ chat not found)만 영구로 본다.
 //
 // ⚠코드(403)만 보고 판정하지 않는다. 403 에는 "봇이 채널 관리자에서 빠졌다" 처럼
