@@ -328,6 +328,12 @@ func (r *Runner) PollOnce(ctx context.Context) {
 
 	r.log.Printf("dispatching %d new items to %d subscriptions", len(newItems), len(subs))
 
+	// 이번 폴에서 영구 실패로 끊은 수신자. subs 는 폴 시작 때 한 번 읽은 스냅샷이라,
+	// 여기 기록해 두지 않으면 **같은 사람의 남은 슬롯과 뒤이은 아이템에 계속 다시
+	// 보낸다**(nara-bot 처럼 한 사람이 조건별 슬롯을 여럿 가지는 봇에서 두드러진다).
+	// DB 는 이미 꺼졌지만 스냅샷은 그것을 모른다.
+	deadRecipients := make(map[string]bool)
+
 	// Notify
 	for _, item := range newItems {
 		if r.cfg.OnNewItem != nil {
@@ -352,6 +358,9 @@ func (r *Runner) PollOnce(ctx context.Context) {
 		var sendFailed bool
 		var lastSendErr error
 		for _, sub := range subs {
+			if deadRecipients[sub.Recipient] {
+				continue
+			}
 			sent, err := r.cfg.Store.IsSent(sub.ID, item.ID)
 			if err != nil || sent {
 				continue
@@ -368,6 +377,26 @@ func (r *Runner) PollOnce(ctx context.Context) {
 			}
 			if err := r.cfg.Notifier.Send(ctx, sub.Recipient, msg); err != nil {
 				r.log.Printf("send error sub=%s recipient=%s: %v", sub.ID, sub.Recipient, err)
+				// ⚠영구 수신 실패(차단·계정 삭제·chat not found)는 **재시도 대상이
+				//   아니다.** 아래 maxSendAttempts 상한은 아이템 단위라, 새 아이템이
+				//   올 때마다 카운터가 0 부터 다시 시작해 상한이 아무것도 막지 못한다.
+				//   nara-bot 에서 차단된 구독 하나가 새 공고마다 `Forbidden: bot was
+				//   blocked by the user` 를 찍어 로그를 채우고 있었다(2026-09-09).
+				//   구독을 끄고 사람에게 알린 다음 넘어간다 — 다른 구독자에게는
+				//   이 아이템이 정상 발송돼야 하므로 sendFailed 로 세지 않는다.
+				if core.IsPermanentRecipient(err) {
+					deadRecipients[sub.Recipient] = true
+					n, derr := r.cfg.Store.DeactivateRecipient(sub.Recipient)
+					if derr != nil {
+						r.log.Printf("deactivate recipient error recipient=%s: %v", sub.Recipient, derr)
+					} else {
+						r.log.Printf("recipient deactivated recipient=%s subs=%d: %v", sub.Recipient, n, err)
+					}
+					r.invokeOnError(fmt.Errorf(
+						"수신자 %s 에게 보낼 수 없어 구독 %d건을 껐다(다시 받으려면 그쪽에서 /start): %w",
+						sub.Recipient, n, err))
+					continue
+				}
 				sendFailed = true
 				lastSendErr = err
 				continue

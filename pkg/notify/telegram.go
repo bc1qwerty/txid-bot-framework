@@ -160,6 +160,70 @@ func (t *Telegram) send(c tgbotapi.Chattable, kind string) error {
 	return err
 }
 
+// permanentRecipientMarkers 는 "이 수신자에게는 앞으로도 못 보낸다" 를 뜻하는
+// 텔레그램 응답들이다. 전부 사람이 봇을 차단했거나 계정·대화가 사라진 경우라,
+// 몇 번을 다시 보내도 같은 답이 온다.
+//
+// ⚠일시적 실패를 여기 넣으면 멀쩡한 구독자가 조용히 끊긴다. 429·5xx·네트워크
+// 오류는 절대 넣지 말 것 — 그쪽은 isTransient 가 맡는다.
+var permanentRecipientMarkers = []string{
+	"bot was blocked by the user",
+	"user is deactivated",
+	"chat not found",
+	"bot was kicked",
+	"the group chat was deleted",
+	"bot is not a member",
+	"not enough rights to send",
+}
+
+// isPermanentRecipient 는 403 계열(+ chat not found)만 영구로 본다.
+//
+// ⚠코드(403)만 보고 판정하지 않는다. 403 에는 "봇이 채널 관리자에서 빠졌다" 처럼
+// 관리자가 되돌릴 수 있는 것도 섞이는데, 그것도 되돌리기 전까지는 보낼 수 없으니
+// 비활성화가 맞다 — 다만 사람에게 알려서 /start 로 되살릴 수 있게 해야 한다.
+// 그래서 판정 자체는 넓게 두고, 알림 문구에서 복구 방법을 안내한다.
+func isPermanentRecipient(err error) bool {
+	if err == nil {
+		return false
+	}
+	var tgErr *tgbotapi.Error
+	if errors.As(err, &tgErr) {
+		if tgErr.Code == 403 {
+			return true
+		}
+		if tgErr.Code == 400 && strings.Contains(tgErr.Message, "chat not found") {
+			return true
+		}
+	}
+	// ⚠tgbotapi 가 항상 *tgbotapi.Error 로 감싸 주지는 않는다(isTransient 주석과 같은
+	//   이유). 문자열 판정을 폴백으로 둔다.
+	s := strings.ToLower(err.Error())
+	for _, m := range permanentRecipientMarkers {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// finish 는 발송 오류를 호출부에 돌려주기 직전에 두 가지를 한다.
+//  1. 영구 수신 실패면 core.ErrPermanentRecipient 로 감싼다.
+//  2. 토큰을 지운다.
+//
+// ⚠순서가 중요하다. scrub 은 errors.New 로 **새 오류를 만들어 사슬을 끊으므로**,
+// *tgbotapi.Error 를 봐야 하는 판정은 반드시 scrub 앞에서 끝내야 한다.
+func (t *Telegram) finish(err error) error {
+	if err == nil {
+		return nil
+	}
+	permanent := isPermanentRecipient(err)
+	scrubbed := t.scrub(err)
+	if permanent {
+		return fmt.Errorf("%w: %v", core.ErrPermanentRecipient, scrubbed)
+	}
+	return scrubbed
+}
+
 // API returns the underlying bot API for custom handlers.
 func (t *Telegram) API() *tgbotapi.BotAPI {
 	return t.api
@@ -308,5 +372,5 @@ func (t *Telegram) Send(ctx context.Context, recipient string, msg core.Message)
 	if hasKeyboard {
 		text.ReplyMarkup = keyboard
 	}
-	return t.scrub(t.send(text, "message"))
+	return t.finish(t.send(text, "message"))
 }

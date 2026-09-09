@@ -240,6 +240,29 @@ func (s *Store) Unsubscribe(chatID string) error {
 	return err
 }
 
+// DeactivateRecipient 는 **한 수신자에게 딸린 모든 구독**을 끄고 끈 개수를 준다.
+//
+// Unsubscribe 와 다른 점은 키다. Unsubscribe 는 chat_id(=Subscription.ID) 하나를
+// 끄는데, 봇에 따라 한 사람이 조건별로 여러 슬롯을 가진다
+// (nara-bot 의 `5385429383:1`·`:2` — chat_id 는 슬롯마다 다르고 recipient 만 같다).
+// 사람이 봇을 **차단**했다면 그 사람의 슬롯이 전부 못 가므로 recipient 로 끊어야 한다.
+//
+// ⚠매칭식은 ActiveSubscriptions 의 폴백과 **정확히 같아야** 한다. 옛 행은 recipient
+// 가 빈 문자열이고 그때는 chat_id 가 곧 수신자다 — 여기서 그 폴백을 빠뜨리면
+// 옛 행은 영영 안 꺼지고 소음이 남는다.
+func (s *Store) DeactivateRecipient(recipient string) (int, error) {
+	res, err := s.db.Exec(
+		`UPDATE bot_subscribers SET active = 0
+		 WHERE bot_key = ? AND active = 1
+		   AND COALESCE(NULLIF(recipient, ''), chat_id) = ?`,
+		s.botKey, recipient)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 // ActiveSubscribers returns all currently-subscribed chat IDs.
 func (s *Store) ActiveSubscribers() ([]string, error) {
 	rows, err := s.db.Query(
