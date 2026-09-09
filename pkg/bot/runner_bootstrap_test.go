@@ -19,9 +19,9 @@ import (
 // dedup DB 캐시가 축출되면 이 모드로 돌도록 돼 있어서(bot.yml "Detect dedup cache
 // loss"), 아래 두 성질이 깨지면 그 복구 경로가 통째로 무너진다:
 //
-//	1) 발송이 0건이다 — 하나라도 나가면 캐시 유실 때마다 대량 발송이 된다.
-//	2) 상한과 무관하게 **전부** seen 처리된다 — 일부만 표시하면 남은 것이
-//	   다음 실행에서 다시 신규가 되어, 정확히 막으려던 유실이 그때 일어난다.
+//  1. 발송이 0건이다 — 하나라도 나가면 캐시 유실 때마다 대량 발송이 된다.
+//  2. 상한과 무관하게 **전부** seen 처리된다 — 일부만 표시하면 남은 것이
+//     다음 실행에서 다시 신규가 되어, 정확히 막으려던 유실이 그때 일어난다.
 func TestBootstrapMarksAllSeenAndSendsNothing(t *testing.T) {
 	st := newTestStore(t)
 	if err := st.Subscribe("100"); err != nil {
