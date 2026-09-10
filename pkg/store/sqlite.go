@@ -319,6 +319,22 @@ func (s *Store) RecordSendFailure(source, itemID, errMsg string) (int, error) {
 	return attempts, err
 }
 
+// SendFailureAttempts 는 (source, itemID) 의 누적 실패 횟수를 준다. 기록이 없으면 0.
+//
+// **재시도 중인지 판별**하는 용도다. 0 이 아니면 이 아이템은 이전 폴에서 이미 한 번
+// 처리 흐름을 탄 것이다 — Runner 가 OnNewItem 을 다시 부르지 않게 하는 데 쓴다.
+// RecordSendFailure 와 달리 카운터를 올리지 않는다.
+func (s *Store) SendFailureAttempts(source, itemID string) (int, error) {
+	var attempts int
+	err := s.db.QueryRow(
+		`SELECT attempts FROM bot_send_failure WHERE bot_key = ? AND source = ? AND item_id = ?`,
+		s.botKey, source, itemID).Scan(&attempts)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return attempts, err
+}
+
 // ClearSendFailure 는 아이템이 결국 성공(또는 포기)했을 때 카운터를 지운다.
 func (s *Store) ClearSendFailure(source, itemID string) error {
 	_, err := s.db.Exec(

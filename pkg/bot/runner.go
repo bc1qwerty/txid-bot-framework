@@ -337,8 +337,23 @@ func (r *Runner) PollOnce(ctx context.Context) {
 	// Notify
 	for _, item := range newItems {
 		if r.cfg.OnNewItem != nil {
-			if err := r.cfg.OnNewItem(ctx, item); err != nil {
-				r.log.Printf("OnNewItem hook error (item=%s): %v", item.ID, err)
+			// ⚠**재시도 중인 아이템에는 다시 부르지 않는다.** 이 훅의 계약은
+			//   "아이템당 한 번"인데(위 필드 주석), 발송 실패로 seen 처리가 미뤄진
+			//   아이템은 다음 폴에서 newItems 에 다시 들어와 훅이 또 불렸다.
+			//   실측: nara-bot 의 한 공고가 차단된 구독자 때문에 8번 재시도되면서
+			//   알림 허브에 **같은 공고가 8번 푸시**됐다(2026-09-08~09). 알림 자체는
+			//   IsSent 가 막지만 이 훅은 그 게이트 밖이라 아무도 안 막고 있었다.
+			//   실패 카운터가 0 이 아니면 이전 폴에서 이미 한 번 흐름을 탄 것이다.
+			//   ⚠조회 실패는 "처음"으로 간주한다 — 훅을 빠뜨리는 것보다 한 번 더
+			//   부르는 쪽이 안전하다(허브 중복은 성가시지만 유실은 되돌릴 수 없다).
+			attempts, err := r.cfg.Store.SendFailureAttempts(itemSource(item), item.ID)
+			if err != nil {
+				r.log.Printf("send-failure lookup error (item=%s): %v", item.ID, err)
+			}
+			if attempts == 0 {
+				if err := r.cfg.OnNewItem(ctx, item); err != nil {
+					r.log.Printf("OnNewItem hook error (item=%s): %v", item.ID, err)
+				}
 			}
 		}
 
