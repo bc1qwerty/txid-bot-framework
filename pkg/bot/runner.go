@@ -362,7 +362,19 @@ func (r *Runner) PollOnce(ctx context.Context) {
 				continue
 			}
 			sent, err := r.cfg.Store.IsSent(sub.ID, item.ID)
-			if err != nil || sent {
+			if err != nil {
+				// ⚠"조회 실패"와 "이미 보냈다"를 같이 continue 하던 자리다. 그러면
+				//   아이템이 루프 끝에서 seen 처리되고 **이 구독자는 그 알림을 영영
+				//   못 받는다.** DB 가 잠깐 흔들린 것과 보낼 필요가 없는 것은 전혀
+				//   다른데 결과가 같았고, 로그조차 남지 않아 흔적도 없었다.
+				//   판단할 수 없으면 미룬다 — 아래 sendFailed 경로가 다음 폴에서
+				//   다시 시도하게 한다.
+				r.log.Printf("is-sent lookup error sub=%s item=%s: %v", sub.ID, item.ID, err)
+				sendFailed = true
+				lastSendErr = err
+				continue
+			}
+			if sent {
 				continue
 			}
 			if r.cfg.ItemFilter != nil && !r.cfg.ItemFilter(ctx, sub, item) {
@@ -403,7 +415,13 @@ func (r *Runner) PollOnce(ctx context.Context) {
 			}
 			matched = true
 			if err := r.cfg.Store.MarkSent(sub.ID, item.ID); err != nil {
-				r.log.Printf("mark sent error: %v", err)
+				// ⚠발송은 이미 성공했다. 여기서 sendFailed 를 세우면 다음 폴에서
+				//   IsSent 가 여전히 false 라 **같은 알림이 다시 간다.** 그래서
+				//   재시도하지 않고 사람에게 올린다 — 이 기록이 깨지는 것이 곧
+				//   중복 발송의 원인이라 로그 한 줄로 넘길 일이 아니다.
+				r.log.Printf("mark sent error sub=%s item=%s: %v", sub.ID, item.ID, err)
+				r.invokeOnError(fmt.Errorf(
+					"발송 기록 실패 — 중복 발송 위험 sub=%s item=%s: %w", sub.ID, item.ID, err))
 			}
 		}
 
