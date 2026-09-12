@@ -233,6 +233,22 @@ func (r *Runner) PollOnce(ctx context.Context) {
 	r.log.Printf("polling source=%s", source)
 
 	items, err := r.cfg.Source.Fetch(ctx)
+
+	// ⚠**종료 신호로 끊긴 폴은 장애가 아니다.** 아래 분기는 그것을 모르고
+	//   `fetch error: … context canceled` 를 찍은 뒤 OnError 까지 불렀고, 그 줄이
+	//   그대로 사람 경보로 올라갔다(social-feed 2026-09-12, VPS 재시작마다 🔴).
+	//   더 나쁜 것은 그 다음이다 — 이미 죽은 ctx 로 **디스패치를 계속했다**.
+	//   OnNewItem 이 취소된 ctx 로 허브를 찔러 실패하고(nara-bot 2026-09-10
+	//   「허브 push 실패 23건」이 이것이다), 발송도 전부 실패해 그 아이템들의
+	//   SendFailureAttempts 가 올라간다. 그러면 다음 기동에서 `attempts != 0` 이라
+	//   **OnNewItem 훅이 아예 건너뛰어져 허브 푸시가 영영 유실된다.**
+	//   재시작 중에는 아무것도 하지 않고 나간다. 남은 아이템은 seen 처리가 안 됐으니
+	//   다음 기동의 첫 폴이 정상적으로 다시 집는다.
+	if ctx.Err() != nil {
+		r.log.Printf("poll canceled by shutdown")
+		return
+	}
+
 	if err != nil {
 		// Partial success is possible for composite sources (MultiSource):
 		// we still dispatch whatever was returned so a single failing
