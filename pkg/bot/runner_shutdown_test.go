@@ -93,6 +93,43 @@ func TestPollOnceStillAlertsOnRealFetchError(t *testing.T) {
 	}
 }
 
+// 원샷 봇은 폴 전체를 `WithTimeout` 으로 감싼다(safety_alarm_bot·best-archive-bot
+// 은 5분 예산 뒤 PollOnce). 예산 초과는 **사람이 봐야 하는 고장**이므로 종료 취소와
+// 달리 반드시 경보해야 한다.
+//
+// ⚠이 게이트를 `ctx.Err() != nil` 로 두면 그 신호까지 통째로 삼킨다 — 크롤이 5분을
+//
+//	넘겨도 로그 한 줄 없이 조용해진다. 취소(Canceled)와 예산 초과(DeadlineExceeded)를
+//	갈라야 하는 이유가 이것이다.
+func TestPollOnceStillAlertsWhenDeadlineExceeded(t *testing.T) {
+	st := newTestStore(t)
+	var onErrCalls int
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	r := New(Config{
+		Name:      "test",
+		Source:    &deadlineSource{},
+		Formatter: fakeFormatter{}, Notifier: &fakeNotifier{}, Store: st, PollInterval: time.Hour,
+		OnError: func(err error) { onErrCalls++ },
+	})
+
+	r.PollOnce(ctx)
+
+	if onErrCalls != 1 {
+		t.Fatalf("예산 초과에 OnError 가 %d회 — 1회여야 한다. "+
+			"원샷 봇의 「크롤이 예산을 넘겼다」가 조용해진다.", onErrCalls)
+	}
+}
+
+// 예산이 끝날 때까지 붙잡고 있다가 그대로 돌려준다(원샷 봇의 실제 실패 모양).
+type deadlineSource struct{}
+
+func (deadlineSource) Name() string { return "fake" }
+func (deadlineSource) Fetch(ctx context.Context) ([]core.Item, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 // SIGTERM 이 폴 도중에 도착한 상황: Fetch 가 도는 사이 ctx 가 끊기고,
 // 그 상태 그대로 아이템과 에러가 돌아온다(social-feed 의 실제 로그 모양이다 —
 // `fetch error: … context canceled` 다음 줄이 `dispatching 10 items despite errors`).

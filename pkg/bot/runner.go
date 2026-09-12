@@ -4,6 +4,7 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -244,7 +245,13 @@ func (r *Runner) PollOnce(ctx context.Context) {
 	//   **OnNewItem 훅이 아예 건너뛰어져 허브 푸시가 영영 유실된다.**
 	//   재시작 중에는 아무것도 하지 않고 나간다. 남은 아이템은 seen 처리가 안 됐으니
 	//   다음 기동의 첫 폴이 정상적으로 다시 집는다.
-	if ctx.Err() != nil {
+	//   ⚠**게이트는 「취소」만 본다 — deadline 만료는 그대로 경보한다.** 처음엔
+	//   `ctx.Err() != nil` 로 뒀는데, 그러면 폴 전체를 타임아웃으로 감싸는 원샷 봇
+	//   (safety_alarm_bot·best-archive-bot 은 `WithTimeout(5분)` 뒤 PollOnce)의
+	//   **「크롤이 예산을 넘겼다」는 진짜 신호까지 통째로 삼킨다.** 그쪽은 사람이
+	//   봐야 하는 고장이다. 종료 신호는 Canceled, 예산 초과는 DeadlineExceeded 로
+	//   갈라서 온다.
+	if errors.Is(ctx.Err(), context.Canceled) {
 		r.log.Printf("poll canceled by shutdown")
 		return
 	}
