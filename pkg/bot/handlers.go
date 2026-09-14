@@ -213,11 +213,7 @@ func (d *TelegramDispatcher) handleCommand(ctx context.Context, msg *tgbotapi.Me
 			reply = d.messages.Unsubscribed
 		}
 	default:
-		if h, ok := d.handlers[cmd]; ok {
-			reply = h(ctx, chatID, args)
-		} else {
-			reply = d.messages.Unknown
-		}
+		reply = d.messages.Unknown
 	}
 
 	if reply != "" {

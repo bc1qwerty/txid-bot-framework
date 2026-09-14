@@ -126,13 +126,24 @@ func isTransient(err error) bool {
 // 이미 이 정책을 쓰고 있다). 새 메서드를 여기 태우기 전에 그것부터 확인할 것.
 const sendRetryMax = 3
 
+// retry_after 를 따라 기다리는 상한(디스코드의 discordMaxWait 와 같은 캡).
+const telegramMaxWait = 30 * time.Second
+
 // retryWait 는 이 오류를 다시 시도할지, 얼마나 기다릴지 답한다.
 // 429 는 텔레그램이 parameters.retry_after 로 대기 시간을 알려 주므로 그걸 따른다
 // — 임의 백오프로 밀어붙이면 한도를 더 깎아먹는다.
 func retryWait(err error, attempt int) (time.Duration, bool) {
 	var tgErr *tgbotapi.Error
 	if errors.As(err, &tgErr) && tgErr.RetryAfter > 0 {
-		return time.Duration(tgErr.RetryAfter) * time.Second, true
+		// ⚠ 상한 없이 따르면 수백 초 time.Sleep 이 폴과 그레이스풀 종료를 통째로
+		//   막아 systemd TimeoutStop 을 넘겨 SIGKILL 을 부른다. 그렇게 큰
+		//   retry_after 는 지금 재시도해 봐야 못 보낸다는 뜻이라 즉시 포기한다 —
+		//   아이템 단위 재시도(bot_send_failure)가 다음 폴에서 다시 집으므로
+		//   알림은 유실되지 않는다.
+		if wait := time.Duration(tgErr.RetryAfter) * time.Second; wait <= telegramMaxWait {
+			return wait, true
+		}
+		return 0, false
 	}
 	if isTransient(err) {
 		return time.Duration(attempt*2) * time.Second, true

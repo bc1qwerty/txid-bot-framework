@@ -3,6 +3,10 @@
 All notable changes to txid-bot-framework. The project is pre-1.0 and
 breaking changes are tracked here so downstream bots know what to update.
 
+> **⚠ This file stopped at v0.3.0.** Nothing from v0.4.0 through v0.10.2
+> is recorded here (the "Unreleased" section below shipped long ago) —
+> the canonical record is `git log --oneline v0.3.0..HEAD` and the tags.
+
 ## v0.3.0
 
 ### Added

@@ -145,3 +145,34 @@ func TestTransientFailureStillRetriesAndKeepsSubscription(t *testing.T) {
 		t.Fatalf("일시 실패가 재시도되지 않았다: %v", n.delivered)
 	}
 }
+
+// 차단으로 구독을 끈 사실을 봇 쪽에도 알린다(OnRecipientDeactivated) — bangool 은
+// 레거시 conditions 를 함께 꺼야 그 지역 폴링이 멈추고, migrate.sql 재실행에도
+// 죽은 구독이 되살아나지 않는다(/delete 가 양쪽을 끄는 것과 같은 짝 맞춤).
+func TestPermanentRecipientFiresDeactivationHook(t *testing.T) {
+	n := newBlockedNotifier("200")
+	st := newTestStore(t)
+	for _, s := range []store.Subscription{
+		{ID: "100:1", Recipient: "100"},
+		{ID: "200:1", Recipient: "200"},
+		{ID: "200:2", Recipient: "200"},
+	} {
+		if err := st.SubscribeRich(s); err != nil {
+			t.Fatalf("subscribe %s: %v", s.ID, err)
+		}
+	}
+	var deactivated []string
+	r := New(Config{
+		Name: "test", Source: &fakeSource{items: []core.Item{{ID: "x", Title: "Xray"}}},
+		Formatter: fakeFormatter{}, Notifier: n, Store: st, PollInterval: time.Hour,
+		OnRecipientDeactivated: func(recipient string) {
+			deactivated = append(deactivated, recipient)
+		},
+	})
+
+	r.PollOnce(context.Background())
+
+	if len(deactivated) != 1 || deactivated[0] != "200" {
+		t.Fatalf("훅이 차단된 수신자에 대해 정확히 1회 불려야 한다: %v", deactivated)
+	}
+}

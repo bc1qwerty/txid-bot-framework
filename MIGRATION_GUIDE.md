@@ -65,6 +65,18 @@ will look new and re-broadcast.
 For sources with a "since N" API (RSS, REST), pass an internal
 high-watermark; for full-snapshot APIs, just return everything.
 
+**Contract: a source must keep re-yielding an item until it has been
+marked seen.** Send-failure retries (and the give-up alert after
+`maxSendAttempts`) only run when the item shows up in a later `Fetch` —
+the runner never re-dispatches from its own state. A source that yields
+an item exactly once (2026-09-10 bangool adapter incident), or a
+sliding-window source whose window slides past an item mid-retry, loses
+that notification silently: no send, no give-up alert, only an orphaned
+`bot_send_failure` row that the daily Cleanup eventually purges with a
+WARNING log. If your window is narrow, widen it by at least
+`maxSendAttempts` polls or pin unsent items until `bot_seen` confirms
+them.
+
 ### `core.Formatter` and `bot.SubscriberFormatter`
 
 ```go

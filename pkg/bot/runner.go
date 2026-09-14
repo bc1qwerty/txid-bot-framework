@@ -117,6 +117,16 @@ type Config struct {
 	// A non-nil return is logged, not fatal.
 	OnItemMatched func(ctx context.Context, item core.Item) error
 
+	// OnRecipientDeactivated is called after a permanent send failure
+	// (blocked bot, deleted account, chat not found) made the runner
+	// deactivate every subscription of that recipient. Use it to keep
+	// bot-side mirrors of subscription state (e.g. bangool's legacy
+	// conditions table) in sync — otherwise those rows stay active,
+	// keep feeding poll targets, and can resurrect the dead
+	// subscription on the next migration run. At most once per
+	// recipient per poll.
+	OnRecipientDeactivated func(recipient string)
+
 	// ItemFilter decides whether a given Subscription should receive a
 	// given item. Return true to deliver, false to skip.
 	//
@@ -359,6 +369,16 @@ func (r *Runner) PollOnce(ctx context.Context) {
 
 	// Notify
 	for _, item := range newItems {
+		// ⚠ 위 종료 게이트는 Fetch 직후 한 번뿐이라, 허브 페이싱으로 디스패치가
+		//   몇 분씩 걸리는 봇(nara-bot 44건≈7분)은 그 사이 SIGTERM 이 올 수 있다.
+		//   그때 OnNewItem 은 죽은 ctx 로 허브를 찔러 실패(로그 한 줄)하는데
+		//   텔레그램 발송은 ctx 를 안 받아 성공한다 → seen 처리돼 그 아이템의
+		//   허브 푸시가 영영 유실된다. 여기서 멈추면 남은 아이템은 seen 이 안
+		//   됐으니 다음 기동의 첫 폴이 정상적으로 다시 집는다.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			r.log.Printf("dispatch aborted by shutdown")
+			return
+		}
 		if r.cfg.OnNewItem != nil {
 			// ⚠**재시도 중인 아이템에는 다시 부르지 않는다.** 이 훅의 계약은
 			//   "아이템당 한 번"인데(위 필드 주석), 발송 실패로 seen 처리가 미뤄진
@@ -395,6 +415,13 @@ func (r *Runner) PollOnce(ctx context.Context) {
 		//   공통이었다.
 		var sendFailed bool
 		var lastSendErr error
+		// ⚠OnItemMatched 의 재시도 중복 게이트(OnNewItem 의 v0.10.0 게이트와 형제).
+		//   부분 발송 실패로 seen 이 미뤄진 아이템은 다음 폴에 다시 오는데, 남은
+		//   구독자에게 성공하면 matched 가 또 true 가 돼 허브에 같은 아이템이
+		//   다시 푸시됐다. IsSent 행이 하나라도 있으면 이전 폴에서 이미 발화한
+		//   것이다. SendFailureAttempts 게이트를 그대로 쓰면 «전원 실패 후
+		//   성공» 폴의 첫 발화까지 삼키므로 여기엔 부적합하다.
+		var alreadyDelivered bool
 		for _, sub := range subs {
 			if deadRecipients[sub.Recipient] {
 				continue
@@ -413,6 +440,7 @@ func (r *Runner) PollOnce(ctx context.Context) {
 				continue
 			}
 			if sent {
+				alreadyDelivered = true
 				continue
 			}
 			if r.cfg.ItemFilter != nil && !r.cfg.ItemFilter(ctx, sub, item) {
@@ -442,6 +470,9 @@ func (r *Runner) PollOnce(ctx context.Context) {
 					} else {
 						r.log.Printf("recipient deactivated recipient=%s subs=%d: %v", sub.Recipient, n, err)
 					}
+					if r.cfg.OnRecipientDeactivated != nil {
+						r.cfg.OnRecipientDeactivated(sub.Recipient)
+					}
 					r.invokeOnError(fmt.Errorf(
 						"수신자 %s 에게 보낼 수 없어 구독 %d건을 껐다(다시 받으려면 그쪽에서 /start): %w",
 						sub.Recipient, n, err))
@@ -463,7 +494,7 @@ func (r *Runner) PollOnce(ctx context.Context) {
 			}
 		}
 
-		if matched && r.cfg.OnItemMatched != nil {
+		if matched && !alreadyDelivered && r.cfg.OnItemMatched != nil {
 			if err := r.cfg.OnItemMatched(ctx, item); err != nil {
 				r.log.Printf("OnItemMatched hook error (item=%s): %v", item.ID, err)
 			}

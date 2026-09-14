@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
+	"log"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -36,10 +36,11 @@ type Store struct {
 // Open opens or creates a SQLite database at the given path.
 // botKey namespaces the tables so multiple bots can share a file.
 func Open(dbPath, botKey string) (*Store, error) {
-	dir := filepath.Dir(dbPath)
-	_ = dir // reserved for mkdir if needed
-
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)")
+	// ⚠ busy_timeout 이 없으면 modernc sqlite 는 기본 busy 핸들러가 없어,
+	//   Runner 와 TelegramDispatcher 고루틴이 다른 커넥션으로 동시 쓰기하는
+	//   순간 즉시 SQLITE_BUSY 가 난다 — MarkSent 실패가 「중복 발송 위험」
+	//   허위 경보로, /subscribe 실패가 사용자 앞 오류로 튄다.
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -378,5 +379,52 @@ func (s *Store) Cleanup(retain time.Duration) error {
 		`DELETE FROM bot_sent WHERE bot_key = ? AND sent_at < ?`, s.botKey, cutoff); err != nil {
 		return err
 	}
+	// 재시도 도중 소스에서 사라진 아이템의 실패 행은 ClearSendFailure(재fetch
+	// 필요)에 영영 닿지 않는다 — 여기서만 정리된다.
+	//
+	// ⚠여기 걸리는 행은 대부분 「발송 실패 후 소스 윈도 밖으로 빠져 재시도도
+	//   포기 경보도 못 받고 유실된 아이템」의 유일한 흔적이다(재시도는 소스가
+	//   같은 아이템을 다시 줄 때만 이어진다 — MIGRATION_GUIDE 의 소스 계약).
+	//   증거를 지우기 전에 경고로 남긴다. 조회 실패는 경고만 포기하고 삭제는
+	//   그대로 진행한다(관측용 조회가 Cleanup 자체를 막으면 안 된다).
+	if ids, total, err := s.staleSendFailures(cutoff, 5); err == nil && total > 0 {
+		log.Printf("WARNING: cleanup purging %d stale bot_send_failure row(s) (bot=%s) — "+
+			"발송 실패 후 소스에서 다시 나타나지 않아 유실됐을 수 있는 아이템: %v",
+			total, s.botKey, ids)
+	}
+	if _, err := s.db.Exec(
+		`DELETE FROM bot_send_failure WHERE bot_key = ? AND updated_at < ?`, s.botKey, cutoff); err != nil {
+		return err
+	}
 	return nil
+}
+
+// staleSendFailures 는 cutoff 보다 오래된 bot_send_failure 의 총 행수와
+// item_id 표본(최대 limit 개)을 준다. Cleanup 의 경고 전용.
+func (s *Store) staleSendFailures(cutoff int64, limit int) ([]string, int, error) {
+	var total int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM bot_send_failure WHERE bot_key = ? AND updated_at < ?`,
+		s.botKey, cutoff).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	if total == 0 {
+		return nil, 0, nil
+	}
+	rows, err := s.db.Query(
+		`SELECT item_id FROM bot_send_failure WHERE bot_key = ? AND updated_at < ?
+		 ORDER BY updated_at LIMIT ?`, s.botKey, cutoff, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, 0, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, total, rows.Err()
 }

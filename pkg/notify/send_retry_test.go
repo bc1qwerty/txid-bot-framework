@@ -53,6 +53,17 @@ func TestRetryWait(t *testing.T) {
 	if _, again := retryWait(errors.New("Bad Request: chat not found"), 1); again {
 		t.Error("영구 오류를 재시도 대상으로 봄")
 	}
+
+	// 상한을 넘는 retry_after 는 기다리지 않고 즉시 포기한다 — 수백 초 Sleep 은
+	// 폴과 그레이스풀 종료를 막아 SIGKILL 을 부른다(디스코드 discordMaxWait 와
+	// 같은 캡). 알림은 아이템 단위 재시도가 다음 폴에서 다시 집는다.
+	bigErr := &tgbotapi.Error{
+		Message:            "Too Many Requests: retry after 300",
+		ResponseParameters: tgbotapi.ResponseParameters{RetryAfter: 300},
+	}
+	if _, again := retryWait(bigErr, 1); again {
+		t.Error("상한 넘는 retry_after 를 그대로 따름 — 300초 Sleep 으로 종료가 막힌다")
+	}
 }
 
 // ── Discord ──────────────────────────────────────────────────────────────
