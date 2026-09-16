@@ -23,7 +23,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          # ⚠ 2026-09-16: `go-version-file: go.mod` 에서 바꿨다. 그 설정은 «모듈이 요구하는
+          #   **최소** 버전» 으로 툴체인을 고정한다 — CI·릴리스가 원하는 «현재 툴체인» 과는
+          #   정반대다. 실측(govulncheck 을 GOTOOLCHAIN 으로 고정해서): go1.22.0 에서 도달 가능한 stdlib 취약점 40건, go1.26.8 에서 0건.
+          #   ⚠go.mod 의 `go` 지시자는 그대로 둔다. 그건 «이 모듈을 쓰려면 최소 몇이 필요한가»
+          #     라는 별개의 값이고, 낮게 두는 데는 이유가 있다(소비자 호환).
+          #   ⚠형제 봇들(bid-alert·food-recall·realestate·best-archive·safety_alarm)도 전부 1.26 이다.
+          go-version: '1.26'
       - name: vet
         run: go vet ./...
       - name: test
