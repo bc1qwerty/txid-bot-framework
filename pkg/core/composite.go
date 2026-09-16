@@ -189,13 +189,20 @@ func (mn *MultiNotifier) Send(ctx context.Context, recipient string, msg Message
 	}
 
 	// Partial failure — log but report success so MarkSent advances.
+	// ⚠ 문구에 "error" 가 들어가야 한다. 이 함대의 원격 로그 감시
+	//   (check-vps-errors)는 journald 를 `Error|error|FATAL|fatal|…` 로 훑는데,
+	//   예전 문구 "multi-notifier partial failure (n of m failed)" 에는 그 표지가
+	//   없어 **훅을 배선하지 않은 봇의 부분 실패가 감시에 안 걸렸다**(2026-09-16).
+	//   지금은 MultiNotifier 를 쓰는 봇이 safety_alarm 하나뿐이고 그쪽은
+	//   OnPartialFailure 로 허브에 올리지만, 훅 없이 쓰는 봇이 생기면 기본 경로가
+	//   유일한 신호가 된다. 프레임워크의 다른 오류 로그도 "error" 를 쓴다(fetch error 등).
 	if len(failures) > 0 {
 		joined := errors.Join(failures...)
 		if mn.Logger != nil {
-			mn.Logger.Printf("multi-notifier partial failure (%d of %d failed): %v",
+			mn.Logger.Printf("multi-notifier partial failure: %d of %d channels returned an error: %v",
 				len(failures), len(mn.Notifiers), joined)
 		} else {
-			log.Printf("multi-notifier partial failure (%d of %d failed): %v",
+			log.Printf("multi-notifier partial failure: %d of %d channels returned an error: %v",
 				len(failures), len(mn.Notifiers), joined)
 		}
 		if mn.OnPartialFailure != nil {

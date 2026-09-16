@@ -124,3 +124,28 @@ func TestMultiNotifierPartialFailureHookPanicRecovered(t *testing.T) {
 		t.Fatalf("panic 회수 로그가 없다: %q", buf.String())
 	}
 }
+
+// ⚠ 훅을 배선하지 않은 봇에서는 이 로그 한 줄이 부분 실패의 **유일한 신호**다.
+// 이 함대의 원격 로그 감시(check-vps-errors)는 journald 를 `Error|error|FATAL|fatal|…`
+// 로 훑으므로, 문구에 그 표지가 없으면 감시 밖으로 떨어진다 — 2026-09-16 에
+// 예전 문구("… (n of m failed)")가 정확히 그 상태였다. 문구를 고칠 때 이 계약을 깨지 말 것.
+func TestMultiNotifierPartialFailureDefaultLogIsGreppableAsError(t *testing.T) {
+	var buf bytes.Buffer
+	mn := NewMultiNotifier(
+		&fakeNotifier{name: "telegram", err: errors.New("kicked")},
+		&fakeNotifier{name: "band"},
+	)
+	mn.Logger = log.New(&buf, "", 0)
+	// OnPartialFailure 를 일부러 배선하지 않는다 — 기본 경로를 본다.
+
+	if err := mn.Send(context.Background(), "123", Message{Text: "x"}); err != nil {
+		t.Fatalf("부분 성공은 nil 이어야 한다, got %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "partial failure") {
+		t.Fatalf("부분 실패가 로그에 없다: %q", out)
+	}
+	if !strings.Contains(out, "error") {
+		t.Fatalf("로그에 'error' 표지가 없어 check-vps-errors 가 못 잡는다: %q", out)
+	}
+}
