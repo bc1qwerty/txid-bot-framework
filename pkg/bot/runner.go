@@ -336,16 +336,33 @@ func (r *Runner) PollOnce(ctx context.Context) {
 	// Backlog cap — when configured, drop oldest excess and mark them seen
 	// so they do not re-enter the queue next poll. This is the framework
 	// equivalent of legacy "backlogCap" controls in pre-merger bots.
+	//
+	// ⚠ 이 폐기는 **영구적**이다. 여기서 seen 이 된 아이템은 다시는 후보가 되지
+	//   않으므로, 사용자가 받았어야 할 알림이 통째로 사라진다. 그런데 오래도록
+	//   흔적이 로그 한 줄뿐이었고 그 줄에는 error 계열 낱말이 없어 함대의 원격
+	//   로그 감시(check-vps-errors 의 `Error|error|FATAL|...`)에 **걸리지 않았다.**
+	//   best-archive 는 2026-09-12~14 에 16회 중 5회가 상한에 걸려 17건을 잃었는데,
+	//   감사 때 사람이 로그를 눈으로 읽어서야 알았다.
+	// 🔑 같은 파일 아래쪽(발송 포기)은 이미 «seen 처리하되 그때는 로그가 아니라
+	//   OnError 로 승격시킨다» 는 원칙을 세워 뒀다. 영구 폐기라는 점이 똑같은데
+	//   이 자리만 그 원칙에서 빠져 있었다 — 정책이 일부 경로에만 걸려 있던 것이다.
 	if r.cfg.MaxItemsPerPoll > 0 && len(newItems) > r.cfg.MaxItemsPerPoll {
 		excess := newItems[r.cfg.MaxItemsPerPoll:]
 		newItems = newItems[:r.cfg.MaxItemsPerPoll]
-		r.log.Printf("backlog cap: dispatching %d, marking %d excess as seen",
+		// ⚠ 문구에 "error" 를 넣는 것은 미관이 아니라 **계약**이다 — 원격 로그
+		//   감시가 `Error|error|FATAL|...` 로 훑는다. 그리고 OnError 를 배선하지
+		//   않은 봇(social-feed 가 그렇다)에서는 이 줄이 유일한 흔적이다.
+		r.log.Printf("backlog cap error: dispatched %d, dropped %d items permanently (marked seen, never retried)",
 			len(newItems), len(excess))
 		for _, it := range excess {
 			if err := r.cfg.Store.MarkSeen(itemSource(it), it.ID); err != nil {
 				r.log.Printf("mark seen (cap excess) error: %v", err)
 			}
 		}
+		r.invokeOnError(fmt.Errorf(
+			"backlog cap error: %d items dropped permanently — 백로그 상한으로 %d건을 발송 없이 영구 폐기했다"+
+				" (MaxItemsPerPoll=%d, 이번 폴 신규 %d건). 상한을 올리거나 폴 간격을 줄일 것",
+			len(excess), len(excess), r.cfg.MaxItemsPerPoll, len(excess)+len(newItems)))
 	}
 
 	// Get subscriptions (the framework iterates these, not raw chat_ids,
