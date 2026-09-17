@@ -105,6 +105,22 @@ func (s *Store) migrate() error {
 		PRIMARY KEY (bot_key, source, item_id)
 	);
 
+	-- OnNewItem 훅 완료 기록.
+	-- ⚠ 예전에는 «발송 실패 카운터가 0 인가» 로 훅의 1회 계약을 흉내 냈다. 그 근사가
+	--   두 방향으로 샜다: ①훅이 실패하고 발송도 실패하면 재시도 폴에서 attempts!=0 이라
+	--   훅을 영영 건너뛰고, ②훅이 실패해도 발송이 성공하면 그대로 seen 처리돼 그
+	--   아이템의 허브 푸시가 유실됐다(nara-bot 재시작 중 SIGTERM 으로 실측 — 죽은 ctx 로
+	--   허브를 찌르고 텔레그램은 ctx 를 안 받아 성공). 성공을 성공으로 기록해야
+	--   «한 번» 과 «유실 없음» 이 동시에 성립한다.
+	CREATE TABLE IF NOT EXISTS bot_hook_done (
+		bot_key TEXT NOT NULL,
+		source TEXT NOT NULL,
+		item_id TEXT NOT NULL,
+		done_at INTEGER NOT NULL DEFAULT (unixepoch()),
+		PRIMARY KEY (bot_key, source, item_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_bot_hook_done_at ON bot_hook_done(done_at);
+
 	CREATE TABLE IF NOT EXISTS bot_sent (
 		bot_key TEXT NOT NULL,
 		chat_id TEXT NOT NULL,
@@ -351,6 +367,23 @@ func (s *Store) MarkSeen(source, itemID string) error {
 	return err
 }
 
+// IsHookDone 은 (source, itemID) 의 OnNewItem 훅이 이미 성공했는지 본다.
+func (s *Store) IsHookDone(source, itemID string) (bool, error) {
+	var cnt int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM bot_hook_done WHERE bot_key = ? AND source = ? AND item_id = ?`,
+		s.botKey, source, itemID).Scan(&cnt)
+	return cnt > 0, err
+}
+
+// MarkHookDone 은 OnNewItem 훅 성공을 기록한다 — 재시도 폴이 훅을 다시 부르지 않게.
+func (s *Store) MarkHookDone(source, itemID string) error {
+	_, err := s.db.Exec(
+		`INSERT OR IGNORE INTO bot_hook_done (bot_key, source, item_id) VALUES (?, ?, ?)`,
+		s.botKey, source, itemID)
+	return err
+}
+
 // IsSent returns true if an alert was already delivered to the given chat.
 func (s *Store) IsSent(chatID, itemID string) (bool, error) {
 	var cnt int
@@ -394,6 +427,10 @@ func (s *Store) Cleanup(retain time.Duration) error {
 	}
 	if _, err := s.db.Exec(
 		`DELETE FROM bot_send_failure WHERE bot_key = ? AND updated_at < ?`, s.botKey, cutoff); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(
+		`DELETE FROM bot_hook_done WHERE bot_key = ? AND done_at < ?`, s.botKey, cutoff); err != nil {
 		return err
 	}
 	return nil

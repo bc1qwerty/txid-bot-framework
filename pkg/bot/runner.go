@@ -396,23 +396,29 @@ func (r *Runner) PollOnce(ctx context.Context) {
 			r.log.Printf("dispatch aborted by shutdown")
 			return
 		}
+		// ⚠**훅의 «아이템당 한 번» 은 성공 기록(bot_hook_done)으로 지킨다.**
+		//   예전에는 «발송 실패 카운터가 0 인가» 로 흉내 냈다(nara-bot 8중 푸시 사고의
+		//   수리). 그 근사가 두 방향으로 샜다:
+		//   ① 훅 실패 + 발송 실패 → 재시도 폴에서 attempts!=0 이라 훅을 영영 건너뜀.
+		//   ② 훅 실패 + 발송 성공 → 그대로 seen 처리. 위 종료 게이트 주석의 실측이
+		//      정확히 이 모양이다 — SIGTERM 중 죽은 ctx 로 허브를 찔러 실패하고
+		//      텔레그램은 ctx 를 안 받아 성공, 허브 푸시만 영영 유실.
+		//   이제 성공하면 기록하고, 실패하면 발송 실패와 같은 경로(seen 유예 +
+		//   bot_send_failure 카운터 공유)로 다음 폴에 재시도한다. 상한도 같이 쓴다 —
+		//   허브가 오래 죽어 있으면 5회 뒤 포기가 OnError 로 승격된다.
+		//   ⚠조회·기록 실패는 «안 했다» 로 간주한다 — 한 번 더 부르는 쪽이 안전하다
+		//   (허브 중복은 성가시지만 유실은 되돌릴 수 없다).
+		var hookErr error
 		if r.cfg.OnNewItem != nil {
-			// ⚠**재시도 중인 아이템에는 다시 부르지 않는다.** 이 훅의 계약은
-			//   "아이템당 한 번"인데(위 필드 주석), 발송 실패로 seen 처리가 미뤄진
-			//   아이템은 다음 폴에서 newItems 에 다시 들어와 훅이 또 불렸다.
-			//   실측: nara-bot 의 한 공고가 차단된 구독자 때문에 8번 재시도되면서
-			//   알림 허브에 **같은 공고가 8번 푸시**됐다(2026-09-08~09). 알림 자체는
-			//   IsSent 가 막지만 이 훅은 그 게이트 밖이라 아무도 안 막고 있었다.
-			//   실패 카운터가 0 이 아니면 이전 폴에서 이미 한 번 흐름을 탄 것이다.
-			//   ⚠조회 실패는 "처음"으로 간주한다 — 훅을 빠뜨리는 것보다 한 번 더
-			//   부르는 쪽이 안전하다(허브 중복은 성가시지만 유실은 되돌릴 수 없다).
-			attempts, err := r.cfg.Store.SendFailureAttempts(itemSource(item), item.ID)
+			done, err := r.cfg.Store.IsHookDone(itemSource(item), item.ID)
 			if err != nil {
-				r.log.Printf("send-failure lookup error (item=%s): %v", item.ID, err)
+				r.log.Printf("hook-done lookup error (item=%s): %v", item.ID, err)
 			}
-			if attempts == 0 {
-				if err := r.cfg.OnNewItem(ctx, item); err != nil {
-					r.log.Printf("OnNewItem hook error (item=%s): %v", item.ID, err)
+			if !done {
+				if hookErr = r.cfg.OnNewItem(ctx, item); hookErr != nil {
+					r.log.Printf("OnNewItem hook error (item=%s): %v", item.ID, hookErr)
+				} else if err := r.cfg.Store.MarkHookDone(itemSource(item), item.ID); err != nil {
+					r.log.Printf("mark hook done error (item=%s): %v", item.ID, err)
 				}
 			}
 		}
@@ -524,8 +530,14 @@ func (r *Runner) PollOnce(ctx context.Context) {
 		//   영원히 성공하지 않으므로, 시도 횟수를 세어 상한을 넘기면 포기하고
 		//   seen 처리하되 그때는 로그가 아니라 OnError 로 승격시킨다 —
 		//   조용히 버리는 것이 애초에 이 결함의 본질이었다.
-		if sendFailed {
-			attempts, err := r.cfg.Store.RecordSendFailure(itemSource(item), item.ID, fmt.Sprint(lastSendErr))
+		// ⚠ 훅 실패도 발송 실패와 같은 유예·상한 경로를 탄다(카운터 공유). 재시도
+		//   폴의 중복 발송은 IsSent 가, 훅 중복은 위 bot_hook_done 이 막는다.
+		if sendFailed || hookErr != nil {
+			reason := lastSendErr
+			if reason == nil {
+				reason = fmt.Errorf("OnNewItem hook: %w", hookErr)
+			}
+			attempts, err := r.cfg.Store.RecordSendFailure(itemSource(item), item.ID, fmt.Sprint(reason))
 			if err != nil {
 				r.log.Printf("record send failure error: %v", err)
 			}
@@ -533,8 +545,8 @@ func (r *Runner) PollOnce(ctx context.Context) {
 				r.log.Printf("send retry pending item=%s attempts=%d/%d", item.ID, attempts, maxSendAttempts)
 				continue // seen 처리하지 않는다 → 다음 폴에서 재시도
 			}
-			r.log.Printf("send gave up item=%s after %d attempts: %v", item.ID, attempts, lastSendErr)
-			r.invokeOnError(fmt.Errorf("발송 %d회 실패로 포기 item=%s: %w", attempts, item.ID, lastSendErr))
+			r.log.Printf("send gave up item=%s after %d attempts: %v", item.ID, attempts, reason)
+			r.invokeOnError(fmt.Errorf("발송/훅 %d회 실패로 포기 item=%s: %w", attempts, item.ID, reason))
 		}
 		if err := r.cfg.Store.ClearSendFailure(itemSource(item), item.ID); err != nil {
 			r.log.Printf("clear send failure error: %v", err)
