@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -316,7 +317,7 @@ func (s *Store) IsSeen(source, itemID string) (bool, error) {
 // 그러지 않으면 chat not found 같은 영구 실패가 매 폴마다 영원히 재시도된다.
 func (s *Store) RecordSendFailure(source, itemID, errMsg string) (int, error) {
 	if len(errMsg) > 500 {
-		errMsg = errMsg[:500]
+		errMsg = strings.ToValidUTF8(errMsg[:500], "") // 바이트 상한이라 글자 경계로 물린다
 	}
 	_, err := s.db.Exec(`
 		INSERT INTO bot_send_failure (bot_key, source, item_id, attempts, last_error, updated_at)
