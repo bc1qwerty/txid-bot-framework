@@ -28,8 +28,10 @@ jobs:
           #   정반대다. 실측(govulncheck 을 GOTOOLCHAIN 으로 고정해서): go1.22.0 에서 도달 가능한 stdlib 취약점 40건, go1.26.8 에서 0건.
           #   ⚠go.mod 의 `go` 지시자는 그대로 둔다. 그건 «이 모듈을 쓰려면 최소 몇이 필요한가»
           #     라는 별개의 값이고, 낮게 두는 데는 이유가 있다(소비자 호환).
-          #   ⚠형제 봇들(bid-alert·food-recall·realestate·best-archive·safety_alarm)도 전부 1.26 이다.
-          go-version: '1.26'
+          #   ⚠형제 봇들(bid-alert·food-recall·realestate·best-archive·safety_alarm)도 전부 1.27 이다.
+          # ⚠ 2026-10-10: check-latest 가 없으면 러너 캐시의 낡은 패치를 쓴다(실측: '1.26' → 캐시 go1.26.8, stdlib 보안 수정 누락).
+          go-version: '1.27'
+          check-latest: true
       - name: vet
         run: go vet ./...
       - name: test
