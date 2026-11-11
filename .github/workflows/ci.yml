@@ -20,8 +20,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           # ⚠ 2026-09-16: `go-version-file: go.mod` 에서 바꿨다. 그 설정은 «모듈이 요구하는
           #   **최소** 버전» 으로 툴체인을 고정한다 — CI·릴리스가 원하는 «현재 툴체인» 과는
